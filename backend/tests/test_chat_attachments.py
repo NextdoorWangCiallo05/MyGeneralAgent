@@ -537,3 +537,80 @@ def test_attachment_tool_not_offered_without_files(client: TestClient) -> None:
     _chat(client, headers, "今天几号？")
 
     assert "read_attachment" not in _tool_names()
+
+
+def test_session_files_endpoint_lists_current_files(client: TestClient) -> None:
+    """会话文件清单要反映「当前」而不是「历史」。
+
+    消息里的附件只是发送当时的快照，删了文件它也不会变；前端靠这个接口才知道
+    会话里如今还剩哪些文件（"本会话文件" 那条常驻栏就是这么来的）。
+    """
+    headers = _register(client, "file-list")
+    manual_id = _upload(client, headers).json()["id"]
+    notes_id = _upload(
+        client, headers, filename="notes.txt", data=b"NOTES-BODY", content_type="text/plain"
+    ).json()["id"]
+    unsent_id = _upload(
+        client, headers, filename="draft.txt", data=b"DRAFT-BODY", content_type="text/plain"
+    ).json()["id"]
+
+    session_id = _session_id(
+        _chat(client, headers, "两份都看下", attachment_ids=[manual_id, notes_id])
+    )
+
+    listed = client.get(f"/api/v1/sessions/{session_id}/attachments", headers=headers)
+    assert listed.status_code == 200, listed.text
+    files = listed.json()
+    # 按上传时间正序，且都已绑定到会话
+    assert [item["filename"] for item in files] == ["manual.md", "notes.txt"]
+    assert all(item["bound"] for item in files)
+    # 上传了却没随消息发出的附件不属于任何会话
+    assert unsent_id not in {item["id"] for item in files}
+
+    # 会话不存在或不属于自己 → 404，不泄露别人会话里放的是什么文件
+    outsider = _register(client, "file-list-outsider")
+    assert (
+        client.get(f"/api/v1/sessions/{session_id}/attachments", headers=outsider).status_code
+        == 404
+    )
+    # 别人的会话列表同样是空的
+    assert client.get("/api/v1/sessions", headers=outsider).json() == []
+
+
+def test_deleting_session_file_drops_it_from_list_and_context(client: TestClient) -> None:
+    """用户可以在会话里自己删文件：清单少一项、下一轮不再注入它的正文。
+
+    会话文件默认一直保留（只有未发送的附件会被 TTL 清理），删除是用户显式动作——
+    删掉之后模型也就看不到它了，避免"我以为删了它还在读"的错觉。
+    """
+    headers = _register(client, "file-delete")
+    manual_id = _upload(client, headers).json()["id"]
+    notes_id = _upload(
+        client, headers, filename="notes.txt", data=b"NOTES-BODY", content_type="text/plain"
+    ).json()["id"]
+
+    session_id = _session_id(
+        _chat(client, headers, "两份都看下", attachment_ids=[manual_id, notes_id])
+    )
+
+    deleted = client.delete(f"/api/v1/attachments/{manual_id}", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+
+    remaining = client.get(f"/api/v1/sessions/{session_id}/attachments", headers=headers).json()
+    assert [item["filename"] for item in remaining] == ["notes.txt"]
+
+    # 消息里的快照不动：那是"当初发过什么"的历史记录（前端据此把卡片标为已删除）
+    history = client.get(f"/api/v1/sessions/{session_id}/messages", headers=headers).json()
+    first_user = next(item for item in history if item["role"] == "user")
+    assert [item["filename"] for item in first_user["attachments"]] == ["manual.md", "notes.txt"]
+    # 原文也读不到了
+    assert client.get(f"/api/v1/attachments/{manual_id}", headers=headers).status_code == 404
+
+    # 下一轮：被删的文件不再进上下文，剩下的照旧可读
+    _chat(client, headers, "剩下这份总结下", session_id=session_id)
+
+    system = _system_message(ScriptedLLM.seen_messages)
+    assert "【附件 1】notes.txt" in system
+    assert "NOTES-BODY" in system
+    assert "manual.md" not in system
+    assert "scripts/rollback.sh" not in system

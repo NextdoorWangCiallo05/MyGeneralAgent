@@ -96,7 +96,7 @@ async def _resolve_attachments(
 
 @router.post("/chat", dependencies=[Depends(rate_limited("chat"))])
 async def chat(payload: ChatRequest, user: CurrentUser, store: Store) -> StreamingResponse:
-    """发送消息，以 SSE 流式返回 start/thinking/tool_call/tool_result/text/usage/done。"""
+    """发送消息，以 SSE 流式返回 start/thinking/thinking_end/tool_call/tool_result/text/usage/done。"""
     # 业务配置以管理后台为准、环境变量兜底（见 app.core.runtime_config）
     settings = await get_runtime_config().effective_settings()
     # 厂商、服务地址、模型名由配置解析成一份确定的接入参数（见 app.llm.providers）

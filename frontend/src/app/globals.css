@@ -927,26 +927,68 @@ h4 {
   color: var(--danger-text);
 }
 
+/* 思考过程：思考中展开跟随，思考结束（thinking_end）后自动收起，点标题可再展开 */
 .thinking {
   margin-bottom: 10px;
-  padding: 10px 12px;
   border-left: 2px solid var(--border-strong);
   background: var(--bg-subtle);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   color: var(--text-muted);
   font-size: 13px;
-  white-space: pre-wrap;
-  max-height: 240px;
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+.thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thinking-head:hover {
+  background: var(--bg-panel);
+}
+
+.thinking-head:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-soft);
 }
 
 .thinking-label {
-  display: block;
+  flex: none;
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
-  margin-bottom: 4px;
+}
+
+.thinking-state {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.thinking-toggle {
+  flex: none;
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--accent-text);
+}
+
+.thinking-body {
+  padding: 0 12px 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 工具调用卡片 */
@@ -1156,6 +1198,11 @@ h4 {
 .session-files .attach-chip {
   max-width: 220px;
   padding: 3px 6px;
+}
+
+.session-files .attach-remove {
+  width: 16px;
+  height: 16px;
 }
 
 .composer-inner {
@@ -1373,6 +1420,20 @@ h4 {
   margin-left: auto;
   color: var(--accent-text);
   font-size: 11.5px;
+}
+
+/* 已被用户从会话中删除的附件：保留在历史气泡里，但不可再展开、不再进上下文 */
+.attach-card.is-deleted {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.attach-card-head.is-static {
+  cursor: default;
+}
+
+.attach-card-head.is-static:hover {
+  background: transparent;
 }
 
 .attach-card-body {

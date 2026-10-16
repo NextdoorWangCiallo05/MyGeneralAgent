@@ -12,6 +12,8 @@ import { API_BASE, getToken } from "@/lib/api";
 export type ChatEvent =
   | { type: "start"; message_id: string; session_id: string }
   | { type: "thinking"; delta: string }
+  /** 本轮推理内容输出完毕（整轮只吐正文时不出现）：前端据此收起「思考过程」 */
+  | { type: "thinking_end" }
   | { type: "text"; delta: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
   | {

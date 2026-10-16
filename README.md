@@ -1,6 +1,6 @@
 # Agent App
 
-一个支持**多用户注册 / 登录 / 找回密码**、**DeepSeek 大模型**、**工具调用（ReAct）**与 **SSE 流式输出**的智能助手应用。
+一个支持**多用户注册 / 登录 / 找回密码**、**DeepSeek 大模型**、**工具调用（ReAct）** 与 **SSE 流式输出**的智能助手应用。
 
 当前进度：**M1 骨架、M2 数据持久化与管理员后台、M3 工具扩充 / 沙箱隔离 / 人工确认均已完成**；
 **M4 已完成上下文摘要压缩（FR-6）与知识库「上传 → 解析 → 分块 → 向量化 → 检索」全链路**
@@ -34,9 +34,12 @@ Langfuse / LangSmith 可插拔链路追踪、工具调用审计（`tool_audit_lo
 ```
 Agent/
 ├── docs/技术设计文档.md
+├── .gitleaks.toml               # 密钥扫描规则（CI 与本地钩子共用）
+├── .githooks/pre-commit         # 提交前密钥扫描（脚本兜底，装了 gitleaks 则用官方规则）
 ├── scripts/
 │   ├── start.ps1                # 一键启动（Windows PowerShell）
-│   └── start.sh                 # 一键启动（macOS / Linux）
+│   ├── start.sh                 # 一键启动（macOS / Linux）
+│   └── install-git-hooks.ps1    # 启用 .githooks/（git config core.hooksPath）
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口、CORS、异常处理、初始管理员
@@ -470,7 +473,8 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 |------|------|------|------|
 | POST | `/api/v1/attachments` | 上传附件：解析为纯文本后暂存，返回元数据（`id` / `filename` / `file_type` / `size_bytes` / `char_count`） | user |
 | GET | `/api/v1/attachments/{id}` | 查看附件详情：元数据 + 解析后的正文（供前端「查看原文」，上限 10 万字符并带 `truncated` 标记） | user |
-| DELETE | `/api/v1/attachments/{id}` | 删除附件（已发出的附件也可删，历史消息仅保留元数据快照） | user |
+| DELETE | `/api/v1/attachments/{id}` | 删除附件（已发出的附件也可删：删掉后不再注入模型上下文，历史消息仅保留元数据快照） | user |
+| GET | `/api/v1/sessions/{session_id}/attachments` | 本会话**当前**的附件清单（按上传时间正序）：前端「本会话文件」栏与「已删除」标记都以它为准 | user |
 
 上传走 `upload` 限流档（与知识库上传同源，默认 20 次/分钟）。
 
@@ -483,6 +487,13 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
         ├─ 发送前校验：数量 ≤ ATTACHMENT_MAX_PER_MESSAGE；逐个校验归属（缺失 / 越权 → 404）
         ├─ 落库 → bind(message_id, session_id) 绑定：附件从「待发送」升级为**会话级资源**，从此豁免 TTL 清理
         └─ 消息行只存元数据快照，重新生成按快照恢复附件（前端无需回传）
+
+绑定之后（会话级资源，默认一直保留）：
+   ├─ 每一轮：GET /sessions/{id}/attachments → 正文注入 system 的「本会话文件」区
+   └─ 用户在「本会话文件」栏点 × 删除（DELETE /attachments/{id}）
+        ├─ 下一轮起正文不再注入（模型看不到它了）
+        ├─ 历史气泡里的卡片标成「已删除」（快照是历史记录，不篡改）
+        └─ 原文预览同步失效（GET /attachments/{id} → 404）
 ```
 
 ### 存储与上下文注入
@@ -522,8 +533,11 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 - 有附件正在上传时禁止发送，避免漏掉文件；上传失败的 chip 不参与发送（自动忽略）；
 - 移除 chip 会同时调用 `DELETE /attachments/{id}` 清理服务端暂存的附件，不留垃圾数据；
 - 用户气泡内以卡片列出附件，点击展开**懒加载原文**（`GET /attachments/{id}`），只加载一次；
-- 输入框上方常驻一条**「本会话文件」**（从历史消息的附件元数据推导），让用户知道附件仍可随时追问，
-  而不是只有上传那一轮有效。
+- 输入框上方常驻一条**「本会话文件」**（以 `GET /sessions/{id}/attachments` 为准，不是从历史消息里猜的），
+  让用户知道附件仍可随时追问，而不是只有上传那一轮有效；
+- 该栏每个文件带 **× 删除按钮**（二次确认）：删掉后本会话不再读取它，
+  气泡里对应的卡片转为虚线灰显的「已删除」态——历史记录保留，但明确告诉你它已经不在上下文里了；
+- 切换会话 / 一轮对话结束后会重新拉取清单：多端同时操作或上传后立即追问，看到的都是**当前**状态。
 
 ### 环境变量
 
@@ -631,6 +645,37 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 
 ---
 
+## 密钥管理
+
+真实密钥（`DEEPSEEK_API_KEY`、`JWT_SECRET`、`ENCRYPTION_KEY` 等）**只放 `.env`**，永不入库：
+
+- `.gitignore` 用 `.env.*` 全量忽略，只放行 `.env.example` / `.env.local.example` 两个占位示例文件
+  （`.env.production`、`.env.development` 之类变体一并在内）；
+- 服务端配置一律 `os.getenv(...)` 读取，代码里不留默认值兜底真钥匙；
+- 后台「运行时配置」里填的 API-Key 走**密文入库**（`ENCRYPTION_KEY` 加密），接口回显只给掩码。
+
+**两道自动闸门**，防止再犯：
+
+| 位置 | 触发时机 | 说明 |
+|------|----------|------|
+| `.github/workflows/ci.yml` 的 `secrets` 任务 | 每次 push / PR | `gitleaks-action` 全量历史扫描，命中即 CI 失败（报告留 artifact）；规则与白名单见 `.gitleaks.toml` |
+| `.githooks/pre-commit` | 每次 `git commit` 前 | 装了 gitleaks 就用官方规则 + 同一份配置（与 CI 口径一致）；没装则退回内置 grep 兜底（厂商前缀 + 高危赋值），零依赖 |
+
+```bash
+# 启用本地钩子（每个克隆者执行一次，只影响本仓库）
+./scripts/install-git-hooks.ps1              # 或：git config core.hooksPath .githooks
+git config --unset core.hooksPath            # 停用
+git commit --no-verify                       # 单次跳过（确属误报时）
+```
+
+> 白名单要克制：`.gitleaks.toml` 只放行**具体的假值字符串**（测试替身、示例占位）与
+> `package-lock.json`，不整体放行 `*.example` / `docs/`——真实密钥粘进示例文件同样该被拦下。
+>
+> 已经推出去的密钥**删文件是不够的**（历史里还在），正确顺序是：先去服务商后台**轮换 / 吊销**，
+> 再清理仓库历史（`git filter-repo`）+ 强推，最后确认旧密钥已失效。
+
+---
+
 ## 测试
 
 ```bash
@@ -638,13 +683,17 @@ cd backend
 .venv/Scripts/python.exe -m pytest tests -q
 ```
 
-共 196 个用例，覆盖：
+共 201 个用例，覆盖：
 
 - 健康检查、注册 / 登录 / 鉴权失败、参数校验、重复注册
 - 找回密码全流程（含**令牌一次性**、**令牌过期/无效**、**防用户枚举**）
 - 会话归属隔离（A 用户无法读取 B 用户的会话与消息）
 - `/chat` 未配置 API-Key 时的 503
 - **SSE 工具调用链路**：`start → text → tool_call → tool_result → text → usage → done`
+- **思考过程事件（3 个用例）**：推理模型先吐 reasoning_content 再吐正文时补发 `thinking_end`
+  （顺序为 `thinking → thinking_end → text`，前端据此自动收起）、
+  只有正文的普通回答**不出现**思考事件（否则前端会冒出空的「思考过程」）、
+  边想边调工具时 `thinking_end` 出现在 `tool_call` 之前且整轮只补一次
 - 模型异常与最大推理轮次保护
 - 计算器工具的安全求值（拒绝 `__import__`、`9**9**9`、除零等）
 - **仓储契约（SQL 实现）**：登录大小写不敏感、会话隔离与软删除、消息 `seq` 连续与 JSON 往返、重置令牌一次性 / 过期 / 批量作废
@@ -679,7 +728,7 @@ cd backend
   **工具层**：结果渲染带来源后端与条数、首个后端失败自动切下一个并附提示、全后端失败与未配置时的降级文案、空关键词被拒；
   **接口层**：`/admin/search/providers` 与 `/admin/search/test` 的权限（匿名 401 / 普通用户 403）、
   后台切换后端即生效、密钥**密文入库**、非法后端被配置校验拒绝、探测接口逐个后端返回状态与耗时
-- **对话附件（19 个用例，`tests/test_chat_attachments.py`）**：接口层——上传解析出元数据、
+- **对话附件（21 个用例，`tests/test_chat_attachments.py`）**：接口层——上传解析出元数据、
   **`.json` 等结构化文本真的能上传**（白名单与前端 accept 都承诺支持 json，解析器不得漏）、
   **超 65535 字节的长正文原样入库不截断**（MySQL `TEXT` 上限，见下）、
   非法类型 / 空文件 / 超长文件名 / 超限文件被拒、未登录 401、详情截断标记、**用户隔离**（他人附件 404）、
@@ -690,7 +739,9 @@ cd backend
   **会话里没有附件时不下发 `read_attachment`**、
   元数据随消息落库并完成绑定、附件缺失 / 越权时发送报 404、超过单条消息上限报 400、
   `ATTACHMENT_MAX_CHARS` 生效为截断、**4 万字的附件整篇注入**（旧默认 2 万字符会把后半段悄悄截掉）、
-  **重新生成按库中快照恢复附件**、TTL 清理只删未绑定附件
+  **重新生成按库中快照恢复附件**、TTL 清理只删未绑定附件、
+  **会话文件清单接口按「当前」返回**（未发送的附件不属于任何会话、他人 404）、
+  **用户删掉会话文件后清单少一项、下一轮不再注入它的正文**（历史快照保留，前端据此标「已删除」）
 - **附件读取工具（5 个用例，`tests/test_attachment_tool.py`）**：按 offset / limit 分段读取与越界夹取、
   模型把参数传成字符串时的兜底、`keyword` 命中（返回上下文窗口）与未命中、空 id / 不存在的 id 给出可纠正的错误、
   **他人附件读不到**、**已绑定到其他会话的附件拒绝读取**、
@@ -744,6 +795,7 @@ cd backend
 |------|------|
 | `start` | `message_id`, `session_id` |
 | `thinking` | `delta`（reasoning_content） |
+| `thinking_end` | 无载荷：本轮推理内容输出完毕（第一个非 reasoning 分片到达时补发）。前端据此**自动收起**「思考过程」，用户点标题可再展开；整轮只吐正文时不出现该事件 |
 | `text` | `delta` |
 | `tool_call` | `id`, `name`, `args` |
 | `tool_confirm` | `id`, `name`, `args`, `expires_in`（需人工确认，流挂起等待 `POST /chat/confirm`） |
@@ -840,7 +892,9 @@ app/store/__init__.py # get_store()：按 STORE_BACKEND 选择实现
 | 知识库文档 | 上传 / 解析 / 分块 / 预览 / 删除（MySQL 存储，向量列为 JSON 文本） | ~~M4~~ **已完成** |
 | 向量化与检索 | 可插拔嵌入后端（默认零依赖 `hash`，可选本地 BGE）+ `knowledge_search` 工具 + 重建索引 / 检索调试接口 | ~~M4~~ **已完成**；语义质量取决于所选嵌入后端 |
 | 向量存储 | JSON 文本 + 应用层余弦暴力检索（数万 chunk 量级） | 数据量上来后换 pgvector / 独立向量库 |
-| 对话附件 | 输入框上传 / 拖拽（txt / md / csv / json / pdf 等），绑定后**整个会话可用**（system 注入 + `read_attachment` 按需读取）、气泡内可预览原文；未发送附件按 TTL 清理 | **已完成**（正文与消息分表存储） |
+| 对话附件 | 输入框上传 / 拖拽（txt / md / csv / json / pdf 等），绑定后**整个会话可用**（system 注入 + `read_attachment` 按需读取）、气泡内可预览原文、可在「本会话文件」栏自行删除；未发送附件按 TTL 清理 | **已完成**（正文与消息分表存储） |
 | 停止生成 | 单实例内存任务表 | 多实例部署改 Redis |
 
-> 关于「思考过程」：`deepseek-flash` 不返回 `reasoning_content`，此时中间推理文本会作为 `text` 事件直接流式展示；接入 `deepseek-reasoner` 后 `thinking` 事件会自动填充。
+> 关于「思考过程」：`deepseek-flash` 不返回 `reasoning_content`，此时中间推理文本会作为 `text` 事件直接流式展示；
+> 接入 `deepseek-reasoner` 后 `thinking` 事件会自动填充，前端在思考时展开跟随、收到 `thinking_end`
+> （或本轮结束）后**自动收起**，用户点标题可随时再展开（手动开合过就不再自动跟随）。

@@ -117,6 +117,73 @@ def test_system_prompt_guides_mermaid_diagrams(
     assert "不要为配图而配图" in system
 
 
+def _events(body: str) -> list[str]:
+    return [line[len("event: ") :] for line in body.splitlines() if line.startswith("event: ")]
+
+
+def test_thinking_end_marks_end_of_reasoning_phase(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """推理模型（deepseek-reasoner 等）先吐 reasoning_content 再吐正文：
+    思考阶段收尾时要补一个 thinking_end，前端据此把「思考过程」自动收起。"""
+    ScriptedLLM.scripts = [
+        [
+            ChatChunk(kind=ChunkKind.REASONING.value, text="先算 6 乘 7……"),
+            ChatChunk(kind=ChunkKind.CONTENT.value, text="42。"),
+            ChatChunk(kind=ChunkKind.DONE.value),
+        ]
+    ]
+    monkeypatch.setattr(chat_api, "build_llm_client", lambda *_: ScriptedLLM())
+
+    body = _post_chat(client, auth_headers)
+
+    # 顺序：思考 → 思考结束 → 正文（前端在 thinking_end 那一刻收起，正文不再被压到屏幕外）
+    assert _events(body)[:4] == ["start", "thinking", "thinking_end", "text"]
+    assert "先算 6 乘 7……" in body
+    assert "42。" in body
+
+
+def test_thinking_end_absent_without_reasoning(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只吐正文的普通回答不该出现思考事件，否则前端会冒出一个空的「思考过程」。"""
+    ScriptedLLM.scripts = [
+        [
+            ChatChunk(kind=ChunkKind.CONTENT.value, text="42。"),
+            ChatChunk(kind=ChunkKind.DONE.value),
+        ]
+    ]
+    monkeypatch.setattr(chat_api, "build_llm_client", lambda *_: ScriptedLLM())
+
+    events = _events(_post_chat(client, auth_headers))
+
+    assert "thinking" not in events
+    assert "thinking_end" not in events
+
+
+def test_thinking_end_before_tool_call(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """边想边调工具：思考 → 工具调用之间也要收尾，且整轮只补一次（避免重复触发收起）。"""
+    ScriptedLLM.scripts = [
+        [
+            ChatChunk(kind=ChunkKind.REASONING.value, text="需要算一下"),
+            ChatChunk(kind=ChunkKind.TOOL_CALLS.value, tool_calls=[TOOL_CALL]),
+            ChatChunk(kind=ChunkKind.DONE.value),
+        ],
+        [
+            ChatChunk(kind=ChunkKind.CONTENT.value, text="结果是 42。"),
+            ChatChunk(kind=ChunkKind.DONE.value),
+        ],
+    ]
+    monkeypatch.setattr(chat_api, "build_llm_client", lambda *_: ScriptedLLM())
+
+    events = _events(_post_chat(client, auth_headers))
+
+    assert events.count("thinking_end") == 1
+    assert events.index("thinking_end") < events.index("tool_call")
+
+
 def test_tool_call_roundtrip(
     client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

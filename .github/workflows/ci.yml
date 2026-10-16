@@ -5,6 +5,27 @@ on:
   pull_request:
 
 jobs:
+  # 密钥扫描：拦住「真实 API Key / 密码被推进仓库」这类事故。
+  # 规则与白名单见 .gitleaks.toml；本地想有同样一道闸，跑 scripts/install-git-hooks.ps1。
+  secrets:
+    name: 密钥扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 必须全量历史：gitleaks 扫的是提交内容，浅克隆只看得到最后一次 diff
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # PR 上不刷评论，只在检查结果里给结论
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          # 命中时把报告留成 artifact，方便定位
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'true'
+          # 组织（非个人）仓库需要 License，个人账号无需配置
+
   backend:
     name: 后端测试
     runs-on: ubuntu-latest

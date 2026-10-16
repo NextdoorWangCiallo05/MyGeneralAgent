@@ -266,20 +266,32 @@ class Agent:
                 )
 
                 try:
+                    # 标记「当前是否正在输出推理内容」，用于在思考阶段收尾时补发
+                    # thinking_end（前端据此自动收起思考过程，详见 core.events）
+                    reasoning_open = False
                     async for chunk in self._llm.chat_stream(
                         messages,
                         tools=tool_schemas or None,
                         model=session.model or None,
                     ):
+                        if chunk.kind == ChunkKind.REASONING.value:
+                            reasoning_open = True
+                            yield Event.thinking(chunk.text)
+                            continue
+                        if reasoning_open:
+                            # 第一个非 reasoning 分片（正文 / 工具调用 / 用量）→ 思考结束
+                            reasoning_open = False
+                            yield Event.thinking_end()
                         if chunk.kind == ChunkKind.CONTENT.value:
                             assistant_text += chunk.text
                             yield Event.text(chunk.text)
-                        elif chunk.kind == ChunkKind.REASONING.value:
-                            yield Event.thinking(chunk.text)
                         elif chunk.kind == ChunkKind.TOOL_CALLS.value:
                             tool_calls = chunk.tool_calls
                         elif chunk.kind == ChunkKind.USAGE.value:
                             step_usage = chunk.usage
+                    if reasoning_open:
+                        # 整轮只有思考没有正文（例如只调工具）：流结束时补上收尾事件
+                        yield Event.thinking_end()
                 except Exception as exc:  # noqa: BLE001 - 埋点后原样抛出，由外层统一处理
                     llm_span.end(status="error", error=f"{type(exc).__name__}: {exc}")
                     raise

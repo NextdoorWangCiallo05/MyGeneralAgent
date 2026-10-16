@@ -116,7 +116,17 @@ export function fetchAttachment(id: string): Promise<AttachmentDetail> {
   return request<AttachmentDetail>(`/api/v1/attachments/${id}`);
 }
 
-/** 删除附件（用户在发送前移除，或清理不再需要的附件）。 */
+/** 删除附件（用户在发送前移除，或从会话里移除不再需要的文件）。 */
 export function deleteAttachment(id: string): Promise<{ message: string }> {
   return request<{ message: string }>(`/api/v1/attachments/${id}`, { method: "DELETE" });
+}
+
+/**
+ * 会话当前的附件清单（会话级资源，按上传时间正序）。
+ *
+ * 历史消息里的附件只是发送当时的快照，用户删除文件后它不会变，
+ * 所以「本会话文件」栏与「已删除」标记都以这个接口为准。
+ */
+export function listSessionAttachments(sessionId: string): Promise<AttachmentMeta[]> {
+  return request<AttachmentMeta[]>(`/api/v1/sessions/${sessionId}/attachments`);
 }

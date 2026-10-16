@@ -15,10 +15,53 @@ type Props = {
   onConfirm?: (callId: string, approved: boolean) => Promise<void> | void;
   /** 重新生成本条回答（仅最后一条回答由会话页透传）。 */
   onRegenerate?: (messageId: string) => Promise<void> | void;
+  /**
+   * 已被用户从会话中删除的附件 id。
+   *
+   * 消息里的附件只是发送当时的快照（历史记录不该被改写），所以「删没删」由会话页
+   * 用当前附件清单算出来传进来；清单还没就绪时传 undefined，避免把刚发的文件误标成已删除。
+   */
+  deletedAttachmentIds?: Set<string>;
 };
 
+/**
+ * 思考过程：推理模型边想边吐时展开跟随，`thinking_end`（或本轮结束）后自动收起；
+ * 用户点标题可随时展开/收起——手动开合过之后就不再自动跟随，免得打断阅读。
+ */
+function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(streaming);
+  const [touched, setTouched] = useState(false);
+
+  useEffect(() => {
+    if (!touched) setOpen(streaming);
+  }, [streaming, touched]);
+
+  return (
+    <div className={`thinking${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className="thinking-head"
+        onClick={() => {
+          setTouched(true);
+          setOpen((prev) => !prev);
+        }}
+        aria-expanded={open}
+      >
+        <span className="thinking-label">思考过程</span>
+        <span className="thinking-state">
+          {streaming ? "思考中…" : `已完成 · ${text.length} 字`}
+        </span>
+        <span className="thinking-toggle" aria-hidden>
+          {open ? "收起" : "展开"}
+        </span>
+      </button>
+      {open ? <div className="thinking-body">{text}</div> : null}
+    </div>
+  );
+}
+
 /** 消息里的附件：点击展开解析后的原文（正文按需向后端取，不随历史消息下发）。 */
-function AttachmentCard({ item }: { item: AttachmentMeta }) {
+function AttachmentCard({ item, deleted = false }: { item: AttachmentMeta; deleted?: boolean }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<AttachmentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +84,19 @@ function AttachmentCard({ item }: { item: AttachmentMeta }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  if (deleted) {
+    // 已被用户从会话中删除：留一行不可展开的记录（历史快照不篡改，原文也确实取不到了）
+    return (
+      <div className="attach-card is-deleted" title="该文件已从会话中删除，正文不再进入上下文">
+        <div className="attach-card-head is-static">
+          <span className="attach-ext">{attachmentExt(item.filename)}</span>
+          <span className="attach-name">{item.filename}</span>
+          <span className="attach-size">已删除</span>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -86,7 +142,12 @@ function attachmentSize(size: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export default function MessageBubble({ message, onConfirm, onRegenerate }: Props) {
+export default function MessageBubble({
+  message,
+  onConfirm,
+  onRegenerate,
+  deletedAttachmentIds,
+}: Props) {
   const isUser = message.role === "user";
   // 生成中不出现操作条；出错的回答仍可复制已有内容或重新生成
   const showActions = !isUser && !message.pending && Boolean(message.content || message.error);
@@ -120,10 +181,7 @@ export default function MessageBubble({ message, onConfirm, onRegenerate }: Prop
         <div className="msg-role">{isUser ? "你" : "助手"}</div>
 
         {message.thinking ? (
-          <div className="thinking">
-            <span className="thinking-label">思考过程</span>
-            {message.thinking}
-          </div>
+          <ThinkingBlock text={message.thinking} streaming={pending && !message.thinkingDone} />
         ) : null}
 
         {message.toolCalls?.length ? (
@@ -140,7 +198,11 @@ export default function MessageBubble({ message, onConfirm, onRegenerate }: Prop
             {message.attachments?.length ? (
               <div className="msg-attachments">
                 {message.attachments.map((item) => (
-                  <AttachmentCard key={item.id} item={item} />
+                  <AttachmentCard
+                    key={item.id}
+                    item={item}
+                    deleted={deletedAttachmentIds?.has(item.id) ?? false}
+                  />
                 ))}
               </div>
             ) : null}

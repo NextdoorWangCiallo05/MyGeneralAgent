@@ -7,7 +7,7 @@ import MessageBubble from "@/components/MessageBubble";
 import SessionSidebar from "@/components/SessionSidebar";
 import { useAuth } from "@/hooks/useAuth";
 import { useChatStream } from "@/hooks/useChatStream";
-import { ApiError, request } from "@/lib/api";
+import { ApiError, deleteAttachment, listSessionAttachments, request } from "@/lib/api";
 import {
   toChatMessages,
   type AttachmentMeta,
@@ -32,6 +32,9 @@ export default function ChatWindow() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // 会话级附件（后端为准）：与消息里的快照分开维护，用户删文件后这里立刻反映
+  const [sessionFiles, setSessionFiles] = useState<AttachmentMeta[]>([]);
+  const [sessionFilesReady, setSessionFilesReady] = useState(false);
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
@@ -80,24 +83,47 @@ export default function ChatWindow() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  // ---------------------------------------------------------------- 交互
-  const handleSelectSession = useCallback(async (sessionId: string) => {
-    setActiveId(sessionId);
-    setBanner(null);
+  /** 拉取会话当前的附件清单；失败时保留旧值并标记「未就绪」，避免把文件误标成已删除。 */
+  const refreshSessionFiles = useCallback(async (sessionId: string | null) => {
+    if (!sessionId) {
+      setSessionFiles([]);
+      setSessionFilesReady(true);
+      return;
+    }
     try {
-      const history = await request<ServerMessage[]>(`/api/v1/sessions/${sessionId}/messages`);
-      setMessages(toChatMessages(history));
+      const files = await listSessionAttachments(sessionId);
+      setSessionFiles(files);
+      setSessionFilesReady(true);
     } catch {
-      setMessages([]);
-      setBanner("历史消息加载失败");
+      setSessionFilesReady(false);
     }
   }, []);
+
+  // ---------------------------------------------------------------- 交互
+  const handleSelectSession = useCallback(
+    async (sessionId: string) => {
+      setActiveId(sessionId);
+      setBanner(null);
+      setSessionFilesReady(false);
+      void refreshSessionFiles(sessionId);
+      try {
+        const history = await request<ServerMessage[]>(`/api/v1/sessions/${sessionId}/messages`);
+        setMessages(toChatMessages(history));
+      } catch {
+        setMessages([]);
+        setBanner("历史消息加载失败");
+      }
+    },
+    [refreshSessionFiles],
+  );
 
   const handleNewChat = useCallback(() => {
     setActiveId(null);
     setMessages([]);
     setBanner(null);
     setUsage(null);
+    setSessionFiles([]);
+    setSessionFilesReady(true);
   }, []);
 
   const handleDeleteSession = useCallback(
@@ -183,6 +209,7 @@ export default function ChatWindow() {
                   activeIdRef.current = event.session_id;
                   setActiveId(event.session_id);
                   void loadSessions();
+                  void refreshSessionFiles(event.session_id);
                 }
                 break;
               }
@@ -190,7 +217,16 @@ export default function ChatWindow() {
                 patchAssistant(assistantId, (m) => ({ ...m, content: m.content + event.delta }));
                 break;
               case "thinking":
-                patchAssistant(assistantId, (m) => ({ ...m, thinking: `${m.thinking ?? ""}${event.delta}` }));
+                patchAssistant(assistantId, (m) => ({
+                  ...m,
+                  thinking: `${m.thinking ?? ""}${event.delta}`,
+                  // 又有新的推理片段（多步任务会想第二次）：允许重新跟随展开
+                  thinkingDone: false,
+                }));
+                break;
+              case "thinking_end":
+                // 推理结束，正文还没吐完也不要再压着屏幕：让「思考过程」自动收起
+                patchAssistant(assistantId, (m) => ({ ...m, thinkingDone: true }));
                 break;
               case "tool_call":
                 patchAssistant(assistantId, (m) => ({
@@ -242,7 +278,7 @@ export default function ChatWindow() {
                 patchAssistant(assistantId, (m) => ({ ...m, error: `${event.message}（${event.code}）` }));
                 break;
               case "done":
-                patchAssistant(assistantId, (m) => ({ ...m, pending: false }));
+                patchAssistant(assistantId, (m) => ({ ...m, pending: false, thinkingDone: true }));
                 break;
               default:
                 break;
@@ -251,10 +287,12 @@ export default function ChatWindow() {
         },
       );
 
-      patchAssistant(assistantId, (m) => ({ ...m, pending: false }));
+      patchAssistant(assistantId, (m) => ({ ...m, pending: false, thinkingDone: true }));
       void loadSessions();
+      // 本轮新上传的附件已绑定到会话：拉一次权威清单（「本会话文件」栏 + 删除按钮的手位）
+      void refreshSessionFiles(activeIdRef.current);
     },
-    [loadSessions, patchAssistant, sandboxAvailable, sandboxEnabled, send],
+    [loadSessions, patchAssistant, refreshSessionFiles, sandboxAvailable, sandboxEnabled, send],
   );
 
   const handleSend = useCallback(
@@ -272,6 +310,14 @@ export default function ChatWindow() {
         { id: assistantId, role: "assistant", content: "", pending: true },
       ]);
 
+      // 乐观合并：附件在发送时就被绑定成会话级资源，先显示出来，随后由服务端清单校准
+      if (attachments.length) {
+        setSessionFiles((prev) => [
+          ...prev,
+          ...attachments.filter((item) => !prev.some((known) => known.id === item.id)),
+        ]);
+      }
+
       await streamTurn({
         text,
         assistantId,
@@ -280,6 +326,22 @@ export default function ChatWindow() {
     },
     [streamTurn, streaming],
   );
+
+  /** 从会话里删除一个附件：删除后它不再进入后续任何一轮的上下文。 */
+  const handleRemoveSessionFile = useCallback(async (file: AttachmentMeta) => {
+    const confirmed = window.confirm(
+      `删除「${file.filename}」？\n删除后本会话不再读取它的内容，历史消息里会标记为已删除。`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await deleteAttachment(file.id);
+      setSessionFiles((prev) => prev.filter((item) => item.id !== file.id));
+      setBanner(null);
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : "删除文件失败");
+    }
+  }, []);
 
   /** 重新生成：沿用该条回答对应的提问原地重跑（后端会摘掉这一轮再生成）。 */
   const handleRegenerate = useCallback(
@@ -311,18 +373,19 @@ export default function ChatWindow() {
 
   const activeSession = sessions.find((s) => s.id === activeId);
 
-  // 会话内上传过的文件（按 id 去重、保持上传顺序）。附件是会话级资源：
-  // 后端每一轮都会把它们重新注入上下文，所以这里常驻显示，让用户知道
-  // "那份文件还在"，可以直接追问，不必重新上传。
-  const sessionFiles = useMemo(() => {
-    const seen = new Map<string, AttachmentMeta>();
+  // 消息快照里有、而当前会话清单里已经没有 = 用户后来把它删了。
+  // 清单未就绪（加载失败/正在切换）时传 undefined，宁可先不标记，也不误伤刚发的文件。
+  const deletedAttachmentIds = useMemo(() => {
+    if (!sessionFilesReady) return undefined;
+    const known = new Set(sessionFiles.map((file) => file.id));
+    const deleted = new Set<string>();
     messages.forEach((message) => {
       message.attachments?.forEach((file) => {
-        if (!seen.has(file.id)) seen.set(file.id, file);
+        if (!known.has(file.id)) deleted.add(file.id);
       });
     });
-    return [...seen.values()];
-  }, [messages]);
+    return deleted;
+  }, [messages, sessionFiles, sessionFilesReady]);
 
   return (
     <div className="app-shell">
@@ -387,6 +450,7 @@ export default function ChatWindow() {
                       ? handleRegenerate
                       : undefined
                   }
+                  deletedAttachmentIds={deletedAttachmentIds}
                 />
               ))
             )}
@@ -397,7 +461,7 @@ export default function ChatWindow() {
           <div className="session-files">
             <span
               className="session-files-label"
-              title="本会话上传过的文件在整个对话里都可用，直接追问内容即可（无需重新上传）"
+              title="本会话的文件在整个对话里都可用，直接追问内容即可（无需重新上传）；不再需要时点 × 删除"
             >
               本会话文件
             </span>
@@ -410,6 +474,15 @@ export default function ChatWindow() {
                 <span className="attach-ext">{file.file_type || "file"}</span>
                 <span className="attach-name">{file.filename}</span>
                 <span className="attach-size">{file.char_count} 字</span>
+                <button
+                  type="button"
+                  className="attach-remove"
+                  title="从会话中删除该文件"
+                  aria-label={`删除 ${file.filename}`}
+                  onClick={() => void handleRemoveSessionFile(file)}
+                >
+                  ✕
+                </button>
               </span>
             ))}
           </div>

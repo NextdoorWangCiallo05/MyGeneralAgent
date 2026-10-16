@@ -1,0 +1,64 @@
+#!/bin/sh
+# 提交前密钥扫描：拦住「真实 API Key / 密码被写进暂存区」这类事故。
+#
+# 安装（仓库根目录执行一次）：
+#     git config core.hooksPath .githooks
+# 或直接跑：scripts/install-git-hooks.ps1
+#
+# 行为：
+#   1) 装了 gitleaks 就用官方规则 + .gitleaks.toml（与 CI 完全一致，最准）；
+#   2) 没装则退回内置 grep 兜底（常见厂商前缀 + 高危赋值），零依赖；
+#   3) 确有误报时：`git commit --no-verify` 可跳过，或把该值加进 .gitleaks.toml 白名单。
+#
+# 只扫**暂存的内容**（git show :file），不扫工作区，因此不会拦下你还没 add 的草稿。
+
+set -u
+
+# -z 避免非 ASCII 路径被加引号转义（如 docs/技术设计文档.md），否则后续 [ -f ] 判定会失败
+staged=$(git diff --cached --name-only --diff-filter=ACM -z | tr '\0' '\n')
+[ -z "$staged" ] && exit 0
+
+# ---------------------------------------------------------------- 优先用 gitleaks
+if command -v gitleaks >/dev/null 2>&1; then
+  if gitleaks protect --staged --config .gitleaks.toml --no-banner --redact; then
+    exit 0
+  fi
+  echo ""
+  echo "[pre-commit] gitleaks 发现疑似密钥（上面已列出文件与规则）。"
+  echo "             确认是误报？加入 .gitleaks.toml 的 allowlist；"
+  echo "             确实提交了真实密钥？先删掉并轮换密钥，再用 --no-verify 跳过。"
+  exit 1
+fi
+
+# ---------------------------------------------------------------- grep 兜底
+# 常见厂商前缀 + 私钥头 + 「看起来像真凭据的赋值」
+patterns='sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+assignments='(api[_-]?key|apikey|secret|token|password|passwd|credential)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{16,}["'"'"']'
+
+found=0
+for file in $staged; do
+  [ -f "$file" ] || continue
+  # 跳过第三方锁文件与二进制
+  case "$file" in
+    frontend/package-lock.json|*/package-lock.json) continue ;;
+    *.png|*.jpg|*.jpeg|*.gif|*.pdf|*.ico|*.woff|*.woff2) continue ;;
+  esac
+
+  hit=$(git show ":$file" 2>/dev/null | grep -n -I -E "$patterns|$assignments" \
+    | grep -v -E 'sk-live-1234567890abcdef|sk-sql-1234567890abcdef|sk-live-abcdef|sk-1234567890abcdef|dev-secret-change-me|dev-encryption-key-change-me' \
+    | head -5)
+  if [ -n "$hit" ]; then
+    echo "[pre-commit] $file 里发现疑似密钥："
+    echo "$hit"
+    found=1
+  fi
+done
+
+if [ "$found" -ne 0 ]; then
+  echo ""
+  echo "[pre-commit] 已拦截本次提交。请把密钥改成从环境变量读取（见 backend/.env.example）。"
+  echo "             确属误报可用 git commit --no-verify 跳过；建议顺手装 gitleaks 让本地与 CI 口径一致。"
+  exit 1
+fi
+
+exit 0

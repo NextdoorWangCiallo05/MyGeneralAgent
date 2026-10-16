@@ -1,0 +1,30 @@
+# gitleaks 配置：在默认规则之上，只放行「本来就写死为假值」的东西。
+#
+# 用法：
+#   CI  —— .github/workflows/ci.yml 的 `secrets` 任务（全量历史扫描）
+#   本地 —— 装了 gitleaks 后：gitleaks protect --staged --config .gitleaks.toml
+#           （.githooks/pre-commit 会自动调用；没装则退回内置的 grep 兜底扫描）
+#
+# 注意：这里刻意不整体放行 `**/*.example`、`docs/**` 这类路径——
+# 真实密钥粘进示例文件同样该被拦下，所以只放行「具体的假值字符串」。
+
+[extend]
+# 继承 gitleaks 内置规则（AWS / GitHub / OpenAI / Slack / 私钥 …）
+useDefault = true
+
+[allowlist]
+description = "占位示例值、测试替身与第三方锁文件，均非真实凭据"
+regexes = [
+  # .env.example / .env.local.example 里的占位值
+  '''dev-secret-change-me''',
+  '''dev-encryption-key-change-me''',
+  # 文档与单测里显式构造的假密钥
+  '''sk-1234567890abcdef''',
+  '''sk-live-1234567890abcdef''',
+  '''sk-sql-1234567890abcdef''',
+  '''sk-live-abcdef''',
+]
+paths = [
+  # 锁文件里只有包名与校验和，容易出现「高熵假阳性」
+  '''^frontend/package-lock\.json$''',
+]

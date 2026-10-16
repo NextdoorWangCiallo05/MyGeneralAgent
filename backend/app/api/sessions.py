@@ -9,6 +9,7 @@ from fastapi import APIRouter, status
 
 from app.api.deps import CurrentUser, Store
 from app.core.errors import SessionNotFoundError
+from app.schemas.attachment import AttachmentPublic
 from app.schemas.auth import MessageResponse
 from app.schemas.chat import (
     MessagePublic,
@@ -78,3 +79,18 @@ async def list_messages(session_id: str, user: CurrentUser, store: Store) -> lis
     await _get_owned(session_id, user, store)
     messages = await store.list_messages(session_id)
     return [MessagePublic.model_validate(m) for m in messages]
+
+
+@router.get("/{session_id}/attachments", response_model=list[AttachmentPublic])
+async def list_session_attachments(
+    session_id: str, user: CurrentUser, store: Store
+) -> list[AttachmentPublic]:
+    """本会话的附件清单（会话级资源，按上传时间正序）。
+
+    附件正文每轮都会注入 system 的「本会话文件」区，所以前端需要一份**当前**清单：
+    历史消息里的附件快照是「当初发过什么」，不会随删除而变，两者不能混用。
+    用户在会话内删掉某个附件后，这里立即不再返回它（正文也不再注入模型）。
+    """
+    await _get_owned(session_id, user, store)
+    attachments = await store.list_session_attachments(session_id)
+    return [AttachmentPublic.model_validate(a) for a in attachments]

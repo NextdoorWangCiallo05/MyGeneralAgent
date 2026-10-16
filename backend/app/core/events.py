@@ -1,10 +1,14 @@
 """SSE 事件定义（与《技术设计文档》6.2 节事件表一致）。
 
 事件类型：
-    start / thinking / tool_call / tool_confirm / tool_result / text / usage / done / error
+    start / thinking / thinking_end / tool_call / tool_confirm / tool_result / text / usage /
+    done / error
 
 其中 `tool_confirm` 表示「该工具需要人工确认」，前端应提示用户后调用
 `POST /chat/confirm` 唤醒；Agent 会保持本次流连接挂起等待（见 core.confirmations）。
+
+`thinking_end` 表示「该轮推理内容输出完毕」（第一个非 reasoning 分片到达时补发），
+前端据此把「思考过程」自动收起；只吐正文的普通回答不会出现该事件。
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from typing import Any
 class EventType(str, Enum):
     START = "start"
     THINKING = "thinking"
+    THINKING_END = "thinking_end"
     TOOL_CALL = "tool_call"
     TOOL_CONFIRM = "tool_confirm"
     TOOL_RESULT = "tool_result"
@@ -45,6 +50,11 @@ class Event:
     @classmethod
     def thinking(cls, delta: str) -> "Event":
         return cls(EventType.THINKING.value, {"delta": delta})
+
+    @classmethod
+    def thinking_end(cls) -> "Event":
+        """本轮推理内容输出完毕（无 data，仅作阶段分隔）。"""
+        return cls(EventType.THINKING_END.value)
 
     @classmethod
     def text(cls, delta: str) -> "Event":

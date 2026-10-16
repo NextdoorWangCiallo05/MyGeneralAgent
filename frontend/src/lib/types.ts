@@ -89,6 +89,8 @@ export type ChatMessage = {
   content: string;
   attachments?: AttachmentMeta[];
   thinking?: string;
+  /** 本轮推理内容已输出完毕（收到 thinking_end）：前端据此把「思考过程」自动收起 */
+  thinkingDone?: boolean;
   toolCalls?: ToolCallView[];
   pending?: boolean;
   error?: string;
