@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8.2
+aiosqlite>=0.20        # 测试用：以 SQLite 驱动的内存库回归仓储实现

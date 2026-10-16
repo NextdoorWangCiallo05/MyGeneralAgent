@@ -1,0 +1,17 @@
+# ===== M4：本地语义嵌入（可选）=====
+#
+# 仅在把 EMBEDDING_BACKEND 设为 local 时需要安装：
+#
+#   pip install -r requirements-ml.txt
+#
+# 说明：
+# - 默认的 hash 后端（EMBEDDING_BACKEND=hash）零依赖，无需安装本文件；
+# - 安装后会从 HuggingFace 下载 EMBEDDING_MODEL 指定的模型（默认约 100 MB），
+#   首次运行需联网，之后离线可用；CPU 即可推理；
+# - 切换嵌入后端后，新旧向量不在同一向量空间，必须到知识库页面点「全量重算」重建索引。
+
+# CPU 版 torch（约 200 MB）；如需 GPU，请按 https://pytorch.org 选择对应 index-url 安装
+torch>=2.2
+sentence-transformers>=3.0
+# 检索打分走 numpy 向量化实现（缺失时自动回退纯 Python，速度较慢）
+numpy>=1.26

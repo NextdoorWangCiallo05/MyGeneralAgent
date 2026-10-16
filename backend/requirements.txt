@@ -1,0 +1,27 @@
+# 基础依赖（Python 3.11+，已在 3.14 验证）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.9
+pydantic-settings>=2.4
+email-validator>=2.2
+httpx>=0.27
+PyJWT>=2.8
+bcrypt>=4.1
+python-multipart>=0.0.9
+
+# M2：数据库与迁移（MySQL 8+ / SQLite 均可）
+sqlalchemy[asyncio]>=2.0
+aiomysql>=0.2          # MySQL 异步驱动（纯 Python，依赖 PyMySQL）
+cryptography>=42       # MySQL 8 默认 caching_sha2_password 认证所需（否则连接报 auth 错误）
+alembic>=1.13          # 数据库迁移
+
+# --- 以下为 M3+ 引入 ---
+# redis>=5.0
+# aiosmtplib>=3.0      # 邮件发送（当前用标准库 smtplib 实现）
+pypdf>=4.2             # M4 知识库：PDF 文档解析
+# M4 向量化默认 EMBEDDING_BACKEND=hash（纯标准库，无需额外依赖）；
+# 如需语义检索（EMBEDDING_BACKEND=local），另装：pip install -r requirements-ml.txt
+# python-docx>=1.1
+# M5 可观测性：配置 LANGFUSE_PUBLIC_KEY/SECRET_KEY 后启用 Langfuse 全链路追踪；
+# 未安装/未配置时自动降级为 no-op（改用 OBSERVABILITY_LOG_SPANS=true 可仅打印到日志）
+# langfuse>=2.0
