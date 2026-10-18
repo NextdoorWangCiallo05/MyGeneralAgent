@@ -10,7 +10,8 @@ import { useCallback, useRef, useState } from "react";
 import { API_BASE, getToken } from "@/lib/api";
 
 export type ChatEvent =
-  | { type: "start"; message_id: string; session_id: string }
+  /** model 是本轮实际使用的模型名（空 = 服务端默认），前端据此同步「思考模式」状态 */
+  | { type: "start"; message_id: string; session_id: string; model?: string }
   | { type: "thinking"; delta: string }
   /** 本轮推理内容输出完毕（整轮只吐正文时不出现）：前端据此收起「思考过程」 */
   | { type: "thinking_end" }
@@ -32,6 +33,8 @@ export type ChatPayload = {
   message: string;
   session_id?: string | null;
   model?: string | null;
+  /** 思考模式：true 用厂商的推理模型、false 回落默认模型；不传则保持会话设置 */
+  thinking?: boolean;
   sandbox_enabled?: boolean;
   /** 重新生成：`message` 传该轮原提问，后端会摘掉最后一轮再重跑 */
   regenerate?: boolean;

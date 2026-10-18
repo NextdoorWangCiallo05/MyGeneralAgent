@@ -22,3 +22,8 @@ class RuntimeConfigPublic(BaseModel):
     knowledge_backend: str = "none"
     #: 知识库检索工具名（启用时下发，便于前端提示）
     knowledge_tool: str | None = None
+
+    #: 是否支持「思考模式」：当前厂商没有可确认的推理模型时为 false，前端开关置灰
+    thinking_available: bool = False
+    #: 思考模式使用的推理模型名（不可用时为空串）
+    thinking_model: str = ""

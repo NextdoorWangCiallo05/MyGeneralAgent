@@ -18,12 +18,18 @@ from app.core.errors import (
     AttachmentNotFoundError,
     ConfirmationNotFoundError,
     SessionNotFoundError,
+    ThinkingModeUnavailableError,
     TooManyAttachmentsError,
 )
 from app.core.events import Event
 from app.core.runtime_config import get_runtime_config
 from app.core.tracing import flush_tracer
-from app.llm import LLMNotConfiguredError, build_llm_client, resolve_llm_config
+from app.llm import (
+    LLMNotConfiguredError,
+    build_llm_client,
+    resolve_llm_config,
+    resolve_thinking_model,
+)
 from app.schemas.auth import MessageResponse
 from app.schemas.chat import ChatRequest, ConfirmRequest, StopRequest
 from app.store.entities import Attachment, Session, User
@@ -48,23 +54,38 @@ async def _resolve_session(
     user: User,
     store: Store,
     default_model: str,
+    thinking_model: str,
 ) -> Session:
+    # 思考模式按会话记忆：开启 = 换用推理模型，关闭 = 回落到默认模型。
+    # 显式传 model 时以 model 为准（高级用法：指定某个具体模型）。
+    if payload.thinking is not None:
+        # 显式 model 优先：调用方点名了模型就按它来，不再强求厂商预设
+        if payload.thinking and not (payload.model or thinking_model):
+            raise ThinkingModeUnavailableError()
+        requested_model = payload.model or (
+            thinking_model if payload.thinking else default_model
+        )
+    else:
+        requested_model = payload.model or ""
+
     if payload.session_id:
         session = await store.get_session(payload.session_id)
         if session is None or session.user_id != user.id:
             raise SessionNotFoundError()
         changes: dict[str, object] = {}
-        if payload.model:
-            changes["model"] = payload.model
+        if requested_model:
+            changes["model"] = requested_model
         if payload.sandbox_enabled is not None:
             changes["sandbox_enabled"] = payload.sandbox_enabled
         if changes:
-            await store.update_session(session, **changes)
+            # 必须接收返回值：SQL 存储返回的是重新读出的对象，沿用手上的旧对象会让
+            # 「本轮改的模型 / 沙箱」晚一轮才生效
+            session = await store.update_session(session, **changes)
         return session
 
     return await store.create_session(
         user_id=user.id,
-        model=payload.model or default_model,
+        model=requested_model or default_model,
         sandbox_enabled=bool(payload.sandbox_enabled),
     )
 
@@ -108,7 +129,9 @@ async def chat(payload: ChatRequest, user: CurrentUser, store: Store) -> Streami
         raise ApiKeyNotConfiguredError(f"管理员尚未配置 {llm.label} 的 API-Key")
 
     attachments = await _resolve_attachments(payload, user, store, settings)
-    session = await _resolve_session(payload, user, store, llm.model)
+    session = await _resolve_session(
+        payload, user, store, llm.model, resolve_thinking_model(settings)
+    )
     logger.info(
         "开始生成",
         extra={

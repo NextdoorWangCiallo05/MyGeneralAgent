@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-import ThemeToggle from "@/components/ThemeToggle";
+import ThemeMenu from "@/components/ThemeMenu";
 import type { Session } from "@/lib/types";
 
 type Props = {
@@ -99,7 +99,7 @@ export default function SessionSidebar({
 
         <div className="toggle-row">
           <span>外观</span>
-          <ThemeToggle />
+          <ThemeMenu placement="up" />
         </div>
 
         <div className="toggle-row">

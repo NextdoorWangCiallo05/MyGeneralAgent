@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     # 默认模型：留空表示用所选厂商预设的默认模型
     default_model: str = ""
+    # 思考模式使用的推理模型：留空表示用厂商预设（DeepSeek 默认 deepseek-reasoner）；
+    # 私有部署（vLLM / 企业网关）在这里点名，如 THINKING_MODEL=QwQ-32B
+    thinking_model: str = ""
     llm_timeout: float = 60.0
     # 旧键（保留兼容）：厂商为 deepseek 时等价于 llm_api_key / llm_base_url
     deepseek_api_key: str = ""

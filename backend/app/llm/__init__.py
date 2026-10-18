@@ -23,6 +23,7 @@ from app.llm.providers import (
     list_presets,
     provider_not_found_message,
     resolve_llm_config,
+    resolve_thinking_model,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "list_presets",
     "provider_not_found_message",
     "resolve_llm_config",
+    "resolve_thinking_model",
 ]

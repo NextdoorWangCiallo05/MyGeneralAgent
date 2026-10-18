@@ -12,6 +12,9 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=32_000)
     session_id: Optional[str] = None
     model: Optional[str] = None
+    #: 思考模式：true 用厂商的推理模型（前后端约定的开关，前端不需要知道模型名），
+    #: false 回落到默认模型；不传表示保持会话当前设置不变
+    thinking: Optional[bool] = None
     tools: Optional[list[str]] = None
     sandbox_enabled: Optional[bool] = None
     #: 重新生成：摘掉最后一轮后重跑，`message` 需为该轮的原提问文案

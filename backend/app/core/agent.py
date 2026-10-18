@@ -237,7 +237,9 @@ class Agent:
             )
         await self._maybe_title(session, user_input)
 
-        yield Event.start(message_id=user_message.id, session_id=session.id)
+        yield Event.start(
+            message_id=user_message.id, session_id=session.id, model=session.model or ""
+        )
 
         # 沙箱需「全局总闸 + 会话开关」同时打开；关闭时沙箱类工具根本不下发给模型
         sandbox_on = self._sandbox_enabled(session)

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import ThemeToggle from "@/components/ThemeToggle";
+import ThemeMenu from "@/components/ThemeMenu";
 
 type Props = {
   title: string;
@@ -22,7 +22,7 @@ export default function AuthShell({ title, subtitle, children, footer }: Props) 
           <Link href="/" className="sidebar-title" style={{ color: "inherit" }}>
             Agent App
           </Link>
-          <ThemeToggle />
+          <ThemeMenu placement="down" />
         </div>
 
         <h1>{title}</h1>

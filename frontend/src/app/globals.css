@@ -1,6 +1,8 @@
 /* ============================================================
    设计令牌
-   - 默认深色；浅色由 <html data-theme="light"> 覆盖
+   - 默认深色；其余配色由 <html data-theme="..."> 覆盖整组令牌
+   - 可选：dark（默认）/ light / midnight / ember / paper，
+     与 lib/theme.ts 的 THEME_OPTIONS 一一对应（新增配色两边都要加）
    - 组件样式一律引用这里的语义化变量，不要写死颜色
    ============================================================ */
 :root {
@@ -90,6 +92,126 @@
   --glow-2: rgba(56, 189, 248, 0.12);
 
   --shadow: 0 12px 30px rgba(15, 23, 42, 0.1);
+}
+
+/* 极夜青：夜色 + 青绿强调，长时间阅读不刺眼 */
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --bg: #061315;
+  --bg-elevated: #0a1d20;
+  --bg-panel: #0e262a;
+  --bg-input: #081a1d;
+  --bg-code: #07171a;
+  --bg-subtle: rgba(148, 233, 226, 0.06);
+  --bg-stripe: rgba(148, 233, 226, 0.045);
+  --border: #173c41;
+  --border-strong: #22535a;
+
+  --text: #e0f5f2;
+  --text-muted: #93bab7;
+  --text-faint: #648d8a;
+
+  --accent: #14b8a6;
+  --accent-hover: #2dd4bf;
+  --accent-soft: rgba(20, 184, 166, 0.16);
+  --accent-text: #99f6e4;
+
+  --success: #34d399;
+  --success-text: #6ee7b7;
+  --warning: #fbbf24;
+  --warning-text: #fcd34d;
+  --danger: #fb7185;
+  --danger-text: #fda4af;
+
+  --avatar-user-bg: #12353a;
+  --scrollbar: #1a4147;
+  --scrollbar-hover: #27626c;
+
+  --glow-1: rgba(20, 184, 166, 0.2);
+  --glow-2: rgba(56, 189, 248, 0.12);
+
+  --shadow: 0 12px 32px rgba(1, 12, 14, 0.5);
+}
+
+/* 落日橙：暖色夜色，偏「写作 / 阅读」氛围 */
+:root[data-theme="ember"] {
+  color-scheme: dark;
+
+  --bg: #150d0a;
+  --bg-elevated: #1e1310;
+  --bg-panel: #261811;
+  --bg-input: #1a0f0c;
+  --bg-code: #1b100d;
+  --bg-subtle: rgba(251, 191, 146, 0.06);
+  --bg-stripe: rgba(251, 191, 146, 0.045);
+  --border: #3d251b;
+  --border-strong: #573525;
+
+  --text: #f8ebe3;
+  --text-muted: #cda796;
+  --text-faint: #9b7465;
+
+  --accent: #f97316;
+  --accent-hover: #fb923c;
+  --accent-soft: rgba(249, 115, 22, 0.16);
+  --accent-text: #fdba74;
+
+  --success: #4ade80;
+  --success-text: #86efac;
+  --warning: #facc15;
+  --warning-text: #fde047;
+  --danger: #fb7185;
+  --danger-text: #fda4af;
+
+  --avatar-user-bg: #3b2215;
+  --scrollbar: #43281b;
+  --scrollbar-hover: #613a26;
+
+  --glow-1: rgba(249, 115, 22, 0.18);
+  --glow-2: rgba(244, 63, 94, 0.13);
+
+  --shadow: 0 12px 32px rgba(20, 6, 2, 0.5);
+}
+
+/* 纸墨米：暖白纸感，适合白天与长文阅读 */
+:root[data-theme="paper"] {
+  color-scheme: light;
+
+  --bg: #f6f1e7;
+  --bg-elevated: #fffdf8;
+  --bg-panel: #fffdf8;
+  --bg-input: #faf5ea;
+  --bg-code: #f2ebdd;
+  --bg-subtle: rgba(90, 70, 40, 0.055);
+  --bg-stripe: rgba(90, 70, 40, 0.035);
+  --border: #e6dbc8;
+  --border-strong: #cdbfa3;
+
+  --text: #2a2117;
+  --text-muted: #6a5c47;
+  --text-faint: #8d7f6b;
+
+  --accent: #b45309;
+  --accent-hover: #92400e;
+  --accent-soft: rgba(180, 83, 9, 0.1);
+  --accent-text: #92400e;
+
+  --success: #15803d;
+  --success-text: #166534;
+  --warning: #b45309;
+  --warning-text: #92400e;
+  --danger: #b91c1c;
+  --danger-text: #991b1b;
+
+  --avatar-user-bg: #ece0ca;
+  --scrollbar: #d8cab3;
+  --scrollbar-hover: #bfae91;
+
+  --glow-1: rgba(180, 83, 9, 0.12);
+  --glow-2: rgba(217, 119, 6, 0.1);
+
+  --shadow: 0 12px 30px rgba(73, 52, 20, 0.12);
 }
 
 * {
@@ -216,32 +338,163 @@ h4 {
   width: 100%;
 }
 
-/* 主题切换按钮（侧边栏 / 后台头部 / 认证页复用同一个组件） */
-.theme-toggle {
-  width: 34px;
-  height: 34px;
+/* 配色选择器（侧边栏 / 后台头部 / 认证页复用同一个组件） */
+.theme-menu {
+  position: relative;
   flex-shrink: 0;
-  display: grid;
-  place-items: center;
+}
+
+.theme-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 10px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--bg-panel);
   color: var(--text-muted);
-  font-size: 15px;
+  font: inherit;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
-.theme-toggle:hover {
+.theme-trigger:hover {
   color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: var(--accent-soft);
 }
 
-.theme-toggle:focus-visible {
+.theme-trigger:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.theme-dots {
+  display: inline-flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.theme-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
+}
+
+.theme-trigger-label {
+  max-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-caret {
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+.theme-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  width: 218px;
+  padding: 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  animation: theme-panel-in 0.14s ease;
+}
+
+.theme-panel.is-down {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+
+.theme-panel-title {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-option:hover {
+  background: var(--bg-subtle);
+}
+
+.theme-option.is-active {
+  background: var(--accent-soft);
+}
+
+.theme-option:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-soft);
+}
+
+.theme-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.theme-option-label {
+  font-size: 13px;
+}
+
+.theme-option-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.theme-check {
+  margin-left: auto;
+  color: var(--accent-text);
+  font-size: 12px;
+}
+
+.theme-auto-icon {
+  width: 26px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.theme-divider {
+  margin: 5px 6px;
+  border-top: 1px solid var(--border);
+}
+
+@keyframes theme-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .alert {
@@ -1241,6 +1494,66 @@ h4 {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 思考模式开关：开启后本轮改用推理模型，回答前会先思考（可展开查看） */
+.mode-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.mode-toggle:hover:not([aria-disabled="true"]) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.mode-toggle.is-on {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.mode-toggle[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mode-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.mode-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.mode-toggle.is-on .mode-dot {
+  opacity: 1;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+@media (max-width: 720px) {
+  .mode-toggle {
+    padding: 0 8px;
+    font-size: 11px;
+  }
 }
 
 .icon-btn {

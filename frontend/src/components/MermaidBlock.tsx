@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 
-import { useTheme } from "@/hooks/useTheme";
+import { useThemeMode } from "@/hooks/useTheme";
 
 /**
  * Mermaid 图表渲染。
@@ -44,7 +44,7 @@ let seq = 0;
 type Phase = "waiting" | "rendering" | "ready" | "failed";
 
 export default function MermaidBlock({ code, pending }: { code: string; pending: boolean }) {
-  const theme = useTheme();
+  const mode = useThemeMode();
   const source = code.trim();
   const [phase, setPhase] = useState<Phase>(pending ? "waiting" : "rendering");
   const [svg, setSvg] = useState("");
@@ -65,7 +65,7 @@ export default function MermaidBlock({ code, pending }: { code: string; pending:
           startOnLoad: false,
           securityLevel: "strict",
           // 与站点主题保持一致：深色用内置 dark，浅色用 default
-          theme: theme === "light" ? "default" : "dark",
+          theme: mode === "light" ? "default" : "dark",
         });
         const result = await mermaid.render(id, source);
         if (cancelled) return;
@@ -85,7 +85,7 @@ export default function MermaidBlock({ code, pending }: { code: string; pending:
     return () => {
       cancelled = true;
     };
-  }, [source, theme, pending]);
+  }, [source, mode, pending]);
 
   if (phase === "ready") {
     return (

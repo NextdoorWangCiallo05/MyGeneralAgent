@@ -32,6 +32,9 @@ class ProviderPreset:
     #: 供后台下拉建议的模型名，管理员可以填表外的任意值
     models: tuple[str, ...]
     default_model: str
+    #: 「思考模式」使用的推理模型；为空表示该厂商没有可确认的推理模型，
+    #: 此时前端开关不可用（自定义端点可用环境变量 THINKING_MODEL 指定）
+    reasoning_model: str = ""
     #: 本地部署通常不校验密钥
     requires_api_key: bool = True
     #: 少数端点不接受 stream_options.include_usage
@@ -46,6 +49,7 @@ PRESETS: tuple[ProviderPreset, ...] = (
         base_url="https://api.deepseek.com",
         models=("deepseek-chat", "deepseek-reasoner"),
         default_model="deepseek-chat",
+        reasoning_model="deepseek-reasoner",
         hint="官方端点不加 /v1；经由第三方平台转售时请按平台的地址填写。",
     ),
     ProviderPreset(
@@ -165,6 +169,20 @@ def resolve_llm_config(settings: Settings) -> LLMConfig:
         requires_api_key=preset.requires_api_key,
         stream_usage=preset.stream_usage,
     )
+
+
+def resolve_thinking_model(settings: Settings) -> str:
+    """「思考模式」应使用的推理模型；返回空串表示当前厂商用不了。
+
+    优先级：显式配置 `THINKING_MODEL` > 厂商预设。企业网关 / 私有部署的
+    推理模型（如 vLLM 上的 QwQ）没法预设，用环境变量点名即可。
+    """
+    provider_id = (settings.llm_provider or DEFAULT_PROVIDER_ID).strip().lower()
+    preset = get_preset(provider_id)
+    configured = (settings.thinking_model or "").strip()
+    if configured:
+        return configured
+    return (preset.reasoning_model if preset else "").strip()
 
 
 def build_llm_client(config: LLMConfig) -> LLMClient:

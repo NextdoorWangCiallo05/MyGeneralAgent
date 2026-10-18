@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import ThemeToggle from "@/components/ThemeToggle";
+import ThemeMenu from "@/components/ThemeMenu";
 import { useAuth } from "@/hooks/useAuth";
 import { ApiError, request } from "@/lib/api";
 import type {
@@ -266,7 +266,7 @@ export default function AdminPage() {
         <span className="admin-header-title">系统管理后台</span>
         <span className="admin-tag">{user?.username ?? "admin"} · 管理员</span>
         <div className="admin-header-actions">
-          <ThemeToggle />
+          <ThemeMenu placement="down" />
           <Link href="/" className="btn btn-ghost" style={{ padding: "8px 14px" }}>
             返回对话
           </Link>

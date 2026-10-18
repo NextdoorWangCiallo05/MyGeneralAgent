@@ -142,3 +142,11 @@ class EmbeddingUnavailableError(AppError):
     code = "EMBEDDING_UNAVAILABLE"
     http_status = 400
     default_message = "当前未启用向量化（EMBEDDING_BACKEND=none），无法进行知识库检索"
+
+
+class ThinkingModeUnavailableError(AppError):
+    """当前厂商没有可确认的推理模型，思考模式开不了。"""
+
+    code = "THINKING_MODE_UNAVAILABLE"
+    http_status = 400
+    default_message = "当前模型厂商未配置推理模型，思考模式不可用（可用 THINKING_MODEL 指定）"

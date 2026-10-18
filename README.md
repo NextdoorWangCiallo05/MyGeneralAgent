@@ -11,7 +11,9 @@ Langfuse / LangSmith 可插拔链路追踪、工具调用审计（`tool_audit_lo
 默认「自动」在免密钥后端间自动回退，管理后台可切换、可一键探测（详见下文「联网搜索」章节）；
 **对话支持插入附件**：聊天输入框可选文件上传（txt / md / csv / json / pdf 等，支持拖拽与移除），
 附件绑定会话后整个对话都可调用（正文注入 system 的「本会话文件」区，超预算部分由 `read_attachment` 按需读取），
-气泡内可展开原文预览（详见下文「对话附件」章节）。
+气泡内可展开原文预览（详见下文「对话附件」章节）；
+**对话界面支持「思考模式」**（会话级切换推理模型、流式展示并自动收起思考过程）与**多套配色**
+（5 套色板 + 跟随系统，刷新不闪烁）。
 详细设计见 [`docs/技术设计文档.md`](docs/技术设计文档.md)。
 
 ---
@@ -640,7 +642,7 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 
 | 方法 | 路径 | 说明 | 权限 |
 |------|------|------|------|
-| GET | `/api/v1/config` | 返回 `sandbox_global_enabled`（含沙箱可用工具名）与知识库检索能力 `knowledge_enabled` / `knowledge_backend`（**不含任何敏感项**） | user |
+| GET | `/api/v1/config` | 返回 `sandbox_global_enabled`（含沙箱可用工具名）、知识库检索能力 `knowledge_enabled` / `knowledge_backend`、思考模式能力 `thinking_available` / `thinking_model`（**不含任何敏感项**） | user |
 | POST | `/api/v1/chat/confirm` | 回应 `tool_confirm`：`{session_id, tool_call_id, approved}` | user |
 
 ---
@@ -683,7 +685,7 @@ cd backend
 .venv/Scripts/python.exe -m pytest tests -q
 ```
 
-共 201 个用例，覆盖：
+共 206 个用例，覆盖：
 
 - 健康检查、注册 / 登录 / 鉴权失败、参数校验、重复注册
 - 找回密码全流程（含**令牌一次性**、**令牌过期/无效**、**防用户枚举**）
@@ -694,6 +696,9 @@ cd backend
   （顺序为 `thinking → thinking_end → text`，前端据此自动收起）、
   只有正文的普通回答**不出现**思考事件（否则前端会冒出空的「思考过程」）、
   边想边调工具时 `thinking_end` 出现在 `tool_call` 之前且整轮只补一次
+- **思考模式（5 个用例，`tests/test_thinking_mode.py`）**：`/config` 下发 `thinking_available` / `thinking_model`、
+  开启后会话模型切到推理模型并跨轮记忆、关闭回落到默认模型、默认不开启、厂商无推理模型时
+  `400 THINKING_MODE_UNAVAILABLE`（显式指定 `model` 时仍放行）
 - 模型异常与最大推理轮次保护
 - 计算器工具的安全求值（拒绝 `__import__`、`9**9**9`、除零等）
 - **仓储契约（SQL 实现）**：登录大小写不敏感、会话隔离与软删除、消息 `seq` 连续与 JSON 往返、重置令牌一次性 / 过期 / 批量作废
@@ -787,13 +792,45 @@ cd backend
 - 预设表 `app/llm/providers.py` 描述每家的 `base_url` / 常用模型 / 是否需要 API-Key /
   是否支持 `stream_options`，新增厂商只需加一行；
 - 本地部署（Ollama）不需要密钥，此时不下发 `Authorization` 头；缺密钥时报 `API_KEY_NOT_CONFIGURED`；
-- 旧键 `deepseek_api_key` / `deepseek_base_url` 在 DeepSeek 厂商下等效新键，老 `.env` 零改动。
+- 旧键 `deepseek_api_key` / `deepseek_base_url` 在 DeepSeek 厂商下等效新键，老 `.env` 零改动；
+- **推理模型**：预设里的 `reasoning_model` 声明「思考模式」该用哪个模型（DeepSeek 为 `deepseek-reasoner`），
+  `THINKING_MODEL` 可覆盖（私有部署的 vLLM / 企业网关）；两者都没有时判定为「不支持思考模式」，
+  前端开关置灰、后端对 `thinking: true` 直接报 `THINKING_MODE_UNAVAILABLE`，不做静默降级。
+
+### 思考模式（会话级推理模型）
+
+开关状态是**会话设置**，不是单条消息的临时参数——同一会话的多轮对话保持在同一个模型上：
+
+```
+前端开关 → POST /chat { thinking: true }
+  └─ 后端 resolve_thinking_model() 取推理模型
+       ├─ 不可用 → 400 THINKING_MODE_UNAVAILABLE（开关本就不该点得到）
+       └─ 可用   → 写入 session.model，后续轮次沿用
+                    └─ SSE start 回执 { model } ← 前端据此校准开关（首次开启时会话刚创建）
+```
+
+- 显式传 `model` 时优先于 `thinking`，两者都不传则沿用会话已有模型；
+- `GET /api/v1/config` 下发 `thinking_available` / `thinking_model`，前端据此置灰并给出原因，
+  **不在前端硬编码任何模型名**；
+- 推理内容以 `thinking` 事件流式下发，第一个非推理分片到达时补 `thinking_end`，前端自动收起「思考过程」；
+- 关闭开关时回落到 `default_model`，同样立刻写回会话（不是下一轮才生效）。
+
+### 界面配色
+
+前端内置 5 套配色（深空蓝 / 晴空白 / 极夜青 / 落日橙 / 纸墨米），入口在侧边栏「外观」：
+
+- CSS 自定义属性 + `<html data-theme>` 承载全部颜色，`data-theme` 缺失时才回落到 `dark`；
+- 根布局 `<head>` 的内联脚本在**首次绘制前**读 `localStorage` 写好 `data-theme`，因此刷新不闪白/不闪黑；
+  未选择过（或点了「跟随系统」）则按 `prefers-color-scheme` 决定；
+- 订阅走 `useSyncExternalStore`，`getServerSnapshot` 固定 `dark` 避免水合不匹配，`<html>` 上关闭属性水合告警；
+- 只认明暗的第三方（Mermaid、`color-scheme`、`meta[name=theme-color]`）通过 `useThemeMode()` 取 `dark` / `light`；
+- 新增配色 = `THEME_OPTIONS` 登记一条 + `globals.css` 补一段同名令牌覆盖。
 
 ### SSE 事件协议
 
 | 事件 | 载荷 |
 |------|------|
-| `start` | `message_id`, `session_id` |
+| `start` | `message_id`, `session_id`, `model`（本轮实际使用的模型名，空 = 服务端默认；前端据此校准「思考模式」开关） |
 | `thinking` | `delta`（reasoning_content） |
 | `thinking_end` | 无载荷：本轮推理内容输出完毕（第一个非 reasoning 分片到达时补发）。前端据此**自动收起**「思考过程」，用户点标题可再展开；整轮只吐正文时不出现该事件 |
 | `text` | `delta` |
@@ -812,7 +849,7 @@ cd backend
   主动附 Mermaid 图，并给出防解析失败的语法约束（节点 id 避开保留字、文案含符号时加双引号、
   不用 `%%{init}%%` / `click` / HTML 标签），同时限定「每轮最多 1~2 张、简单内容不硬塞图」；
 - **前端侧**：`MermaidBlock` 按需 `import("mermaid")`（不进首屏包），渲染串行化并做卸载竞态保护，
-  随站点主题在 `default` / `dark` 间切换后重渲染；
+  按当前配色的明暗（`useThemeMode()`）在 `default` / `dark` 间切换后重渲染；
 - **降级**：生成中先显示源码并提示「回答完成后渲染」；语法错误时回退源码 + `Parse error` 提示，
   回答正文不受影响。
 
@@ -821,7 +858,7 @@ cd backend
 `UNAUTHORIZED` / `FORBIDDEN` / `INVALID_CREDENTIALS` / `USER_EXISTS` / `VALIDATION_ERROR` /
 `INVALID_RESET_TOKEN` / `SESSION_NOT_FOUND` / `API_KEY_NOT_CONFIGURED` / `LLM_ERROR` /
 `MAX_STEPS_EXCEEDED` / `CONFIRMATION_NOT_FOUND` / `EMBEDDING_UNAVAILABLE` / `RATE_LIMITED` /
-`ATTACHMENT_NOT_FOUND` / `TOO_MANY_ATTACHMENTS`
+`ATTACHMENT_NOT_FOUND` / `TOO_MANY_ATTACHMENTS` / `THINKING_MODE_UNAVAILABLE`
 
 统一响应体：`{ "code": "...", "message": "..." }`
 

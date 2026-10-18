@@ -81,6 +81,10 @@ export type RuntimeConfig = {
   knowledge_backend: string;
   /** 知识库检索工具名（启用时下发，便于前端提示能力范围） */
   knowledge_tool: string | null;
+  /** 是否支持「思考模式」：厂商没有可确认的推理模型时为 false，开关置灰 */
+  thinking_available: boolean;
+  /** 思考模式使用的推理模型名（不可用时为空串） */
+  thinking_model: string;
 };
 
 export type ChatMessage = {

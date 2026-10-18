@@ -26,9 +26,24 @@ type Props = {
   onStop: () => void;
   streaming: boolean;
   disabled?: boolean;
+  /** 思考模式：开启后本轮换用推理模型，回答前会先思考（过程可展开） */
+  thinking?: boolean;
+  /** 当前厂商是否提供推理模型；false 时开关置灰并说明原因 */
+  thinkingAvailable?: boolean;
+  thinkingModel?: string;
+  onToggleThinking?: () => void;
 };
 
-export default function ChatComposer({ onSend, onStop, streaming, disabled }: Props) {
+export default function ChatComposer({
+  onSend,
+  onStop,
+  streaming,
+  disabled,
+  thinking = false,
+  thinkingAvailable = false,
+  thinkingModel = "",
+  onToggleThinking,
+}: Props) {
   const [value, setValue] = useState("");
   const [items, setItems] = useState<PendingAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -156,6 +171,22 @@ export default function ChatComposer({ onSend, onStop, streaming, disabled }: Pr
             disabled={disabled}
           />
           <div className="composer-actions">
+            <button
+              type="button"
+              className={`mode-toggle${thinking ? " is-on" : ""}`}
+              // 用 aria-disabled 而不是 disabled：原生禁用的按钮收不到指针事件，title 里的原因就看不到了
+              aria-disabled={!thinkingAvailable}
+              onClick={thinkingAvailable ? onToggleThinking : undefined}
+              aria-pressed={thinking}
+              title={
+                thinkingAvailable
+                  ? `思考模式${thinking ? "已开启" : "已关闭"}：用推理模型 ${thinkingModel} 先思考再回答，思考过程可展开`
+                  : "当前模型厂商未配置推理模型，无法开启（可用环境变量 THINKING_MODEL 指定）"
+              }
+            >
+              <span className="mode-dot" aria-hidden />
+              思考模式
+            </button>
             <input
               ref={fileRef}
               type="file"

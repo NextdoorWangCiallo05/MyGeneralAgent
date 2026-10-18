@@ -36,6 +36,8 @@ export default function ChatWindow() {
   const [sessionFiles, setSessionFiles] = useState<AttachmentMeta[]>([]);
   const [sessionFilesReady, setSessionFilesReady] = useState(false);
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
+  // 思考模式：按会话记忆（后端把推理模型写进 session.model），新会话沿用当前选择
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [usage, setUsage] = useState<{ prompt: number; completion: number } | null>(null);
@@ -73,10 +75,17 @@ export default function ChatWindow() {
   }, []);
 
   const sandboxAvailable = runtime?.sandbox_global_enabled ?? false;
+  const thinkingAvailable = runtime?.thinking_available ?? false;
+  const thinkingModel = runtime?.thinking_model ?? "";
 
   useEffect(() => {
     if (!sandboxAvailable) setSandboxEnabled(false);
   }, [sandboxAvailable]);
+
+  useEffect(() => {
+    // 厂商没有推理模型时开关不可用，顺手把残留的开启状态清掉
+    if (!thinkingAvailable) setThinkingEnabled(false);
+  }, [thinkingAvailable]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -106,6 +115,9 @@ export default function ChatWindow() {
       setBanner(null);
       setSessionFilesReady(false);
       void refreshSessionFiles(sessionId);
+      // 思考模式是会话级设置：模型名对得上就是开着的
+      const target = sessions.find((item) => item.id === sessionId);
+      setThinkingEnabled(Boolean(thinkingModel) && target?.model === thinkingModel);
       try {
         const history = await request<ServerMessage[]>(`/api/v1/sessions/${sessionId}/messages`);
         setMessages(toChatMessages(history));
@@ -114,7 +126,7 @@ export default function ChatWindow() {
         setBanner("历史消息加载失败");
       }
     },
-    [refreshSessionFiles],
+    [refreshSessionFiles, sessions, thinkingModel],
   );
 
   const handleNewChat = useCallback(() => {
@@ -198,6 +210,8 @@ export default function ChatWindow() {
           message: text,
           session_id: activeIdRef.current,
           sandbox_enabled: sandboxAvailable && sandboxEnabled,
+          // 不可用时不下发，避免服务端 400（开关本来也点不动）
+          thinking: thinkingAvailable ? thinkingEnabled : undefined,
           regenerate,
           attachment_ids: attachmentIds,
         },
@@ -205,6 +219,10 @@ export default function ChatWindow() {
           onEvent: (event) => {
             switch (event.type) {
               case "start": {
+                // 服务端回执的模型 = 本轮真实生效的模型，用它校准开关（例如首次开思考模式时会话刚创建）
+                if (typeof event.model === "string" && thinkingModel) {
+                  setThinkingEnabled(event.model === thinkingModel);
+                }
                 if (event.session_id !== activeIdRef.current) {
                   activeIdRef.current = event.session_id;
                   setActiveId(event.session_id);
@@ -292,7 +310,17 @@ export default function ChatWindow() {
       // 本轮新上传的附件已绑定到会话：拉一次权威清单（「本会话文件」栏 + 删除按钮的手位）
       void refreshSessionFiles(activeIdRef.current);
     },
-    [loadSessions, patchAssistant, refreshSessionFiles, sandboxAvailable, sandboxEnabled, send],
+    [
+      loadSessions,
+      patchAssistant,
+      refreshSessionFiles,
+      sandboxAvailable,
+      sandboxEnabled,
+      send,
+      thinkingAvailable,
+      thinkingEnabled,
+      thinkingModel,
+    ],
   );
 
   const handleSend = useCallback(
@@ -413,6 +441,7 @@ export default function ChatWindow() {
                 : "支持工具调用与流式输出"}
               {sandboxAvailable && sandboxEnabled ? " · 沙箱已开启" : ""}
               {runtime && !sandboxAvailable ? " · 沙箱已被管理员禁用" : ""}
+              {thinkingAvailable && thinkingEnabled ? ` · 思考模式（${thinkingModel}）` : ""}
             </div>
           </div>
         </header>
@@ -492,6 +521,10 @@ export default function ChatWindow() {
           onSend={(text, attachments) => void handleSend(text, attachments)}
           onStop={stop}
           streaming={streaming}
+          thinking={thinkingEnabled}
+          thinkingAvailable={thinkingAvailable}
+          thinkingModel={thinkingModel}
+          onToggleThinking={() => setThinkingEnabled((prev) => !prev)}
         />
       </main>
     </div>

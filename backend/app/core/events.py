@@ -44,8 +44,12 @@ class Event:
 
     # -------------------------------------------------- 工厂方法
     @classmethod
-    def start(cls, *, message_id: str, session_id: str) -> "Event":
-        return cls(EventType.START.value, {"message_id": message_id, "session_id": session_id})
+    def start(cls, *, message_id: str, session_id: str, model: str = "") -> "Event":
+        # model 是本轮实际使用的模型名（空 = 服务端默认），前端据此同步「思考模式」开关状态
+        return cls(
+            EventType.START.value,
+            {"message_id": message_id, "session_id": session_id, "model": model},
+        )
 
     @classmethod
     def thinking(cls, delta: str) -> "Event":
