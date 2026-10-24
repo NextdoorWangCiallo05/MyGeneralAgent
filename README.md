@@ -26,7 +26,8 @@ Langfuse / LangSmith 可插拔链路追踪、工具调用审计（`tool_audit_lo
 |----|------|
 | 后端 | FastAPI + Pydantic v2 + httpx（OpenAI 兼容协议，厂商可在后台切换） |
 | 鉴权 | JWT（PyJWT）+ bcrypt 密码哈希 |
-| 存储 | SQLAlchemy 2.0 async + Alembic（**MySQL 8+**；可切回内存后端） |
+| 存储 | SQLAlchemy 2.0 async + Alembic（**MySQL 8+ / PostgreSQL 14+**；可切回内存后端） |
+| 向量检索 | PostgreSQL 下 **pgvector + HNSW**（库内 top-k）；MySQL / SQLite 退化为应用层余弦 |
 | 加密 | cryptography / Fernet（API-Key 等敏感配置的对称加密） |
 | 前端 | Next.js 15（App Router）+ React 19 + TypeScript |
 | 实时 | SSE（`text/event-stream`） |
@@ -161,12 +162,12 @@ pip install -r requirements-ml.txt          # torch + sentence-transformers
 # 重启后端，然后到 /knowledge 页面点「全量重算」重建索引
 ```
 
-### 2. 数据库（MySQL，可选）
+### 2. 数据库（MySQL / PostgreSQL，可选）
 
 默认 `STORE_BACKEND=memory`（内存存储，重启即丢数据，适合先跑通流程）。要启用持久化：
 
 ```bash
-# 1) 建库（字符集必须是 utf8mb4）
+# 1) 建库（MySQL 字符集必须是 utf8mb4）
 mysql -u root -p -e "CREATE DATABASE agent_app CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 2) 在 backend/.env 中配置
@@ -176,6 +177,36 @@ mysql -u root -p -e "CREATE DATABASE agent_app CHARACTER SET utf8mb4 COLLATE utf
 # 3) 执行迁移建表（在 backend/ 目录下）
 .venv/Scripts/python.exe -m alembic upgrade head
 ```
+
+**PostgreSQL + pgvector（推荐，向量检索下推数据库）**：
+
+```bash
+# 1) 建库并安装扩展（需要超级用户或云厂商已预装 pgvector）
+psql -U agent -d agent_app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# 2) .env
+#    STORE_BACKEND=sql
+#    DATABASE_URL=postgresql+asyncpg://agent:password@127.0.0.1:5432/agent_app
+
+# 3) 迁移：把 embeddings.embedding 改成 vector(EMBEDDING_DIM)，并建 HNSW 索引
+.venv/Scripts/python.exe -m alembic upgrade head
+
+# 4) 升级后重建向量（迁移会清空旧的 JSON 向量）
+curl -X POST http://localhost:8000/api/v1/knowledge/reindex?force=true -H "Authorization: Bearer <token>"
+```
+
+- 服务端 pgvector 需 **≥ 0.5** 才有 HNSW；版本过旧时迁移自动回退 `ivfflat`（100 lists）；
+- `EMBEDDING_DIM` 决定列类型 `vector(N)`。**换嵌入模型（维度变化）时**必须改列并 `force` 重建：
+  ```sql
+  ALTER TABLE embeddings ALTER COLUMN embedding TYPE vector(1024) USING NULL;
+  DROP INDEX IF EXISTS ix_embeddings_embedding_hnsw;
+  CREATE INDEX ix_embeddings_embedding_hnsw ON embeddings USING hnsw (embedding vector_cosine_ops);
+  ```
+  否则写入会报维度不匹配、检索会自动降级为空结果（日志有告警）；
+- 只装 `pgvector` Python 包不够，数据库侧扩展必须存在；`AUTO_CREATE_TABLES=true` 时启动会尝试自动建扩展与索引（失败仅告警）；
+- HNSW 是**近似**索引：`WHERE user_id = ...` 过滤较重时单次可能少于 `top_k`。可提高 `hnsw.ef_search`，
+  或使用 pgvector ≥ 0.8 的 `hnsw.iterative_scan = relaxed_order`；对召回要求极高的场景可降级为精确扫描
+  （不建向量索引）。
 
 常用迁移命令（均在 `backend/` 下执行）：
 
@@ -190,7 +221,29 @@ mysql -u root -p -e "CREATE DATABASE agent_app CHARACTER SET utf8mb4 COLLATE utf
 > 迁移与运行时共用 `.env` 中的 `DATABASE_URL`，无需在 `alembic.ini` 重复配置。
 > 本地开发也可设 `AUTO_CREATE_TABLES=true` 让服务启动时自动建表，但生产请始终使用迁移。
 
-### 3. 前端
+### 3. 高并发部署要点
+
+单进程默认配置面向本地开发与小流量；并发上来后主要调这三处：
+
+1. **检索下推**：`STORE_BACKEND=sql` + PostgreSQL + pgvector 时，检索是
+   `ORDER BY embedding <=> :q LIMIT k`（HNSW），延迟与库大小基本无关；
+   MySQL / SQLite 仍会取前 `KNOWLEDGE_SEARCH_MAX_CHUNKS` 块在应用层打分；
+2. **连接池**：池按**进程**计，总连接数 ≈ `(DB_POOL_SIZE + DB_MAX_OVERFLOW) × worker 数`，
+   必须小于数据库 `max_connections`；取连接超过 `DB_POOL_TIMEOUT` 秒直接报错（快速失败，避免请求堆积）；
+   空闲时 LIFO 复用最近连接，更容易回收多余连接；
+3. **向量化**：`EMBEDDING_MAX_CONCURRENCY` 限制单进程同时推理数；上传 / 重建索引按 32 块分批，
+   hash 后端的大批量计算自动丢到线程池，避免阻塞事件循环。
+
+```bash
+# 多 worker（Linux / macOS；Windows 下 uvicorn 多 worker 受 spawn 限制，建议用 WSL 或容器）
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+> 注意：限流计数、工具确认注册表、运行中任务表仍是**进程内状态**。多 worker / 多实例下，
+> `/chat/confirm` 与 `/chat/stop` 可能落到别的进程而失效；完整水平扩展需要 Redis 共享状态
+> （已在「已知简化」中列为计划项）。只读接口与流式对话本身无状态，可水平扩展。
+
+### 4. 前端
 
 ```bash
 cd frontend
@@ -203,7 +256,7 @@ npm run dev
 
 打开 http://localhost:3000 → 注册账号 → 开始对话。
 
-### 4. 找回密码（本地开发）
+### 5. 找回密码（本地开发）
 
 默认 `EMAIL_BACKEND=console`，重置邮件**不会真实发送**，而是打印在后端日志中：
 
@@ -446,17 +499,22 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 
 #### 检索链路（`app/core/retriever.py`）
 
-查询向量化 → 取该用户全部已向量化分块（上限 `KNOWLEDGE_SEARCH_MAX_CHUNKS`）→ 余弦相似度打分 → top-k：
+查询向量化 → **存储层检索** `store.search_chunks()` → top-k：
+
+| 部署 | 检索实现 | 说明 |
+|------|----------|------|
+| PostgreSQL + pgvector | `ORDER BY embedding <=> CAST(:q AS vector) LIMIT k` | HNSW 索引，延迟与库大小近似无关；SQL 里 join 文档名，不再二次回查 |
+| MySQL / SQLite | 取候选（上限 `KNOWLEDGE_SEARCH_MAX_CHUNKS`）后应用层打分 | 与内存实现共用余弦口径，装有 numpy 时走矩阵乘法 |
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `KNOWLEDGE_SEARCH_TOP_K` / `..._TOP_K_MAX` | 5 / 20 | 默认与最大返回片段数 |
-| `KNOWLEDGE_SEARCH_MAX_CHUNKS` | 2000 | 单次检索最多参与打分的分块数（控制延迟） |
+| `KNOWLEDGE_SEARCH_MAX_CHUNKS` | 2000 | 单次检索最多参与打分的分块数（**仅 MySQL / SQLite**） |
 | `KNOWLEDGE_SEARCH_MIN_SCORE` | 0.05 | 低于该相似度的片段直接丢弃 |
+| `EMBEDDING_MAX_CONCURRENCY` | 4 | 单进程同时推理数（上传 / 重建 / 检索共用闸门） |
 
-- **应用层暴力打分**：MySQL 8 无原生向量类型，`embeddings.embedding` 以 JSON 文本存储，逐条算余弦；
-  几万 chunk 量级延迟仍在百毫秒级（装有 numpy 时走矩阵乘法，缺失时回退纯 Python），
-  后续换 pgvector / 独立向量库只需替换该列与该函数；
+- **检索下推**：`AbstractStore.search_chunks` 是唯一下推点，SQL 与内存实现各自负责打分与阈值过滤；
+  上层（API、`knowledge_search` 工具、Agent）不感知方言，换独立向量库只需新增一个实现；
 - **用户隔离**：所有 chunk 查询带 `user_id` 条件，检索永远只发生在自己的知识库内；
 - **门控与裁剪**：仅当嵌入后端可用**且**该用户已有已向量化分块时，`knowledge_search` 的 schema 才下发给模型
   （`GET /api/v1/config` 同步暴露 `knowledge_enabled` / `knowledge_backend`，前端据此置灰相关入口）；
@@ -746,7 +804,7 @@ cd backend
 .venv/Scripts/python.exe -m pytest tests -q
 ```
 
-共 216 个用例，覆盖：
+共 225 个用例（另有 1 个 pgvector 集成用例，配置 `PGVECTOR_TEST_URL` 后运行），覆盖：
 
 - 健康检查、注册 / 登录 / 鉴权失败、参数校验、重复注册
 - 找回密码全流程（含**令牌一次性**、**令牌过期/无效**、**防用户枚举**）
@@ -817,6 +875,11 @@ cd backend
   未知 `skill_id` 报 `400 SKILL_NOT_FOUND` 且不留下空会话、
   **模型调用技能外工具被拦下**（`tool_result.status=error`，不下发该 schema）、
   目录技能的 frontmatter 解析 / 非法文件跳过 / 同名覆盖内置 / `/skills` 反映 `SKILLS_DIR`
+- **向量检索下推（9 个用例，`tests/test_vector_store.py`）**：内存实现按相似度排序 + `top_k` / `min_score`、
+  用户与 `source` 隔离、维度不一致的旧向量跳过、已索引文档集合、并发写入分块序号不重复、
+  SQLite 回退应用层打分、检索异常降级为空、向量列在 MySQL / SQLite / PostgreSQL 下分别编译为
+  `LONGTEXT` / `TEXT` / `VECTOR(512)`、pgvector 文本字面量与 JSON 往返；
+  真实 pgvector 的 `<=>` 与 HNSW 由 `tests/test_pgvector_integration.py` 覆盖（需 `PGVECTOR_TEST_URL`）
 - **SQL 仓储（追加）**：附件写入 / 批量取回保序 / 消息 `attachments` JSON 往返 / 绑定 / 过期清理 / 删除、
   **大文本列在 MySQL 方言下编译为 `LONGTEXT`**（模型层的字节上限守门）
 - **限流 / 可观测性 / 审计（M5，16 个用例）**：滑动窗口计数与前 N 次放行、
@@ -897,6 +960,19 @@ npm run test:e2e:ui     # 调试用
 - 推理内容以 `thinking` 事件流式下发，第一个非推理分片到达时补 `thinking_end`，前端自动收起「思考过程」；
 - 关闭开关时回落到 `default_model`，同样立刻写回会话（不是下一轮才生效）。
 
+### 向量检索（pgvector）
+
+- **列类型按方言切换**（`app/models/vector.py`）：PostgreSQL 为 `vector(EMBEDDING_DIM)`，
+  MySQL 为 `LONGTEXT`（JSON），SQLite 为 `TEXT`；同一套 ORM / 业务代码不变；
+- **唯一下推点** `AbstractStore.search_chunks()`：PostgreSQL 走
+  `ORDER BY embedding <=> CAST(:q AS vector) LIMIT k`，文档名在同一条 SQL 里 join；
+  MySQL / SQLite 在存储层内部取候选后用 `score_all()` 打分（numpy 存在时矩阵乘法）；
+- **索引**：迁移 `0008` 建 `HNSW (vector_cosine_ops)`，pgvector < 0.5 自动回退 `ivfflat`；
+  `AUTO_CREATE_TABLES=true` 时启动也会补索引（失败仅告警）；
+- **维度必须一致**：查询维度与列不一致时检索降级为空并打 warning，不影响对话；
+  换嵌入模型后需迁移列 + `force` 重建；
+- **多租户**：`user_id` 过滤始终在 SQL 内，HNSW 过滤较重时可能少返回（见上一节）。
+
 ### 界面配色
 
 前端内置 5 套配色（深空蓝 / 晴空白 / 极夜青 / 落日橙 / 纸墨米），入口在侧边栏「外观」：
@@ -949,12 +1025,12 @@ npm run test:e2e:ui     # 调试用
 `app/store/` 以**抽象仓储接口**隔离持久化实现，上层（API / Agent）只依赖 `AbstractStore`：
 
 ```
-app/models/           # ORM 模型（SQLAlchemy 2.0 Mapped[...]）
-app/db/base.py        # 异步 engine / sessionmaker / Base（惰性创建）
+app/models/           # ORM 模型（SQLAlchemy 2.0 Mapped[...]）；vector.py 按方言切向量列
+app/db/base.py        # 异步 engine / sessionmaker / Base（惰性创建、连接池、启动建表 / 补索引）
 app/store/entities.py # 领域实体（dataclass），两种实现的统一返回类型
-app/store/base.py     # AbstractStore 抽象契约
+app/store/base.py     # AbstractStore 抽象契约（含 search_chunks 检索下推）
 app/store/memory.py   # 进程内实现（开发 / 测试）
-app/store/sql.py      # SQLAlchemy 实现（MySQL / SQLite）
+app/store/sql.py      # SQLAlchemy 实现（MySQL / PostgreSQL / SQLite）
 app/store/__init__.py # get_store()：按 STORE_BACKEND 选择实现
 ```
 
@@ -1008,9 +1084,10 @@ app/store/__init__.py # get_store()：按 STORE_BACKEND 选择实现
 | 链路追踪 | `Tracer` + `TracerSink` 扇出，`LogSink` 零依赖、`LangfuseSink` 可选并自动降级 | ~~M5~~ **已完成** |
 | 工具审计 | `tool_audit_logs` 记录工具 / 参数（脱敏）/ 结果 / 耗时 / 状态 / 是否确认，管理后台可分页查询 | ~~M5~~ **已完成** |
 | 上下文摘要压缩 | 触发阈值 + 保留轮次 + 增量下限，摘要持久化于 `sessions.summary` | ~~M4（FR-6）~~ **已完成** |
-| 知识库文档 | 上传 / 解析 / 分块 / 预览 / 删除（MySQL 存储，向量列为 JSON 文本） | ~~M4~~ **已完成** |
+| 知识库文档 | 上传 / 解析 / 分块 / 预览 / 删除（MySQL / PostgreSQL 存储；向量列按方言） | ~~M4~~ **已完成** |
 | 向量化与检索 | 可插拔嵌入后端（默认零依赖 `hash`，可选本地 BGE）+ `knowledge_search` 工具 + 重建索引 / 检索调试接口 | ~~M4~~ **已完成**；语义质量取决于所选嵌入后端 |
-| 向量存储 | JSON 文本 + 应用层余弦暴力检索（数万 chunk 量级） | 数据量上来后换 pgvector / 独立向量库 |
+| 向量存储 | PostgreSQL `vector(N)` + HNSW（库内 top-k）；MySQL / SQLite 保留 JSON 文本 + 应用层余弦 | ~~M4~~ **已完成**；换维度需迁移列并重建 |
+| 高并发 | pgvector 下推、批量回填 + 行锁、嵌入并发闸门、分块批量编码、连接池超时 / LIFO | **已完成**；多实例共享状态仍待 Redis |
 | 对话附件 | 输入框上传 / 拖拽（txt / md / csv / json / pdf 等），绑定后**整个会话可用**（system 注入 + `read_attachment` 按需读取）、气泡内可预览原文、可在「本会话文件」栏自行删除；未发送附件按 TTL 清理 | **已完成**（正文与消息分表存储） |
 | 技能（Skill） | 内置 3 个 + `SKILLS_DIR` 自定义 Markdown + 可插拔 `SkillProvider`；`skill_id` 为单轮参数，注入 system 并收敛工具范围 | **已完成**；改技能文件需重启（后续可加热加载 / 后台管理） |
 | 停止生成 | 单实例内存任务表 | 多实例部署改 Redis |

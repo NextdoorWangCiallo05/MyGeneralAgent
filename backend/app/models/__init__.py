@@ -27,6 +27,7 @@ from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.models.vector import EmbeddingVector, embedding_dim
 
 #: 大文本列：MySQL 的 `TEXT` 上限是 65535 **字节**（不是字符），一个 4 万汉字的附件正文
 #: 就要约 120 KB，插入时会报 `DataError (1406) Data too long for column ...`。
@@ -179,9 +180,9 @@ class KnowledgeDocumentRow(Base):
 class EmbeddingChunkRow(Base):
     """可检索文本块（M4），对应《技术设计文档》5.2 节的 `embeddings` 表。
 
-    向量以 **JSON 文本**存入 `embedding`：MySQL 8 无原生向量类型，
-    M4 采用「应用层暴力余弦相似度」，数据量级（数万 chunk）内足够；
-    后续若迁移到 pgvector / 独立向量库，只需替换本列与检索实现。
+    向量列由 `EmbeddingVector` 按方言落地：PostgreSQL 为原生 `vector(N)`
+    （`<=>` + HNSW 索引，数据库内 top-k）；MySQL / SQLite 仍是 JSON 文本，
+    检索退化为应用层余弦相似度（见 `app/store/sql.py` 的 `search_chunks`）。
     """
 
     __tablename__ = "embeddings"
@@ -196,8 +197,10 @@ class EmbeddingChunkRow(Base):
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="knowledge")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    #: 向量 JSON：3072 维模型序列化后约 60 KB，已逼近 TEXT 的 65535 字节上限
-    embedding: Mapped[str | None] = mapped_column(LONG_TEXT, nullable=True)
+    #: PostgreSQL = vector(EMBEDDING_DIM)；MySQL = LONGTEXT（JSON 文本）
+    embedding: Mapped[list[float] | None] = mapped_column(
+        EmbeddingVector(embedding_dim()), nullable=True
+    )
     chunk_meta: Mapped[dict | None] = mapped_column("meta", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 

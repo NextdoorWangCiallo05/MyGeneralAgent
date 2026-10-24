@@ -10,14 +10,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import bindparam, delete, func, or_, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.vector_math import score_all
 from app.models import (
     AttachmentRow,
     EmbeddingChunkRow,
@@ -30,10 +33,12 @@ from app.models import (
     UserRow,
 )
 from app.models import utcnow as db_utcnow
+from app.models.vector import vector_literal
 from app.store.base import AbstractStore
 from app.store.entities import (
     Attachment,
     AuditLog,
+    ChunkMatch,
     ConfigItem,
     EmbeddingChunk,
     KnowledgeDocument,
@@ -44,6 +49,8 @@ from app.store.entities import (
     new_id,
     utcnow,
 )
+
+logger = logging.getLogger("app.store.sql")
 
 
 # ---------------------------------------------------------------- 时间转换
@@ -181,15 +188,17 @@ def _to_document(row: KnowledgeDocumentRow) -> KnowledgeDocument:
 
 
 def _to_chunk(row: EmbeddingChunkRow) -> EmbeddingChunk:
-    """向量以 JSON 文本入库，读出时还原为浮点列表（见 app.models 说明）。"""
+    """向量列由 `EmbeddingVector` 按方言解码：PG 是 list，MySQL/SQLite 是 JSON 文本。"""
     embedding: Optional[list[float]] = None
     if row.embedding:
-        try:
-            parsed = json.loads(row.embedding)
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, list):
-            embedding = [float(value) for value in parsed]
+        value = row.embedding
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = None
+        if isinstance(value, (list, tuple)):
+            embedding = [float(item) for item in value]
     return EmbeddingChunk(
         id=row.id,
         user_id=row.user_id,
@@ -208,6 +217,13 @@ class SqlStore(AbstractStore):
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
+        bind = getattr(sessionmaker, "kw", {}).get("bind")
+        self._dialect = getattr(getattr(bind, "dialect", None), "name", "sqlite")
+
+    @property
+    def supports_native_vectors(self) -> bool:
+        """当前方言是否具备原生向量检索能力（PostgreSQL + pgvector）。"""
+        return self._dialect == "postgresql"
 
     @asynccontextmanager
     async def _scope(self) -> AsyncIterator[AsyncSession]:
@@ -667,7 +683,16 @@ class SqlStore(AbstractStore):
         if not contents:
             return 0
         async with self._scope() as session:
-            # 文档内 seq 连续递增，重复导入同一文档时会追加而非覆盖
+            # 文档内 seq 连续递增，重复导入同一文档时会追加而非覆盖。
+            # 并发上传同一文档时，「读 max(seq) 再插入」会撞唯一约束
+            # `uq_embeddings_document_seq`：先锁住文档行，把同一文档的写入串行化。
+            # 锁粒度是单个文档，不同文档的上传互不阻塞。
+            if self._dialect in {"mysql", "postgresql"}:
+                await session.execute(
+                    select(KnowledgeDocumentRow.id)
+                    .where(KnowledgeDocumentRow.id == document_id)
+                    .with_for_update()
+                )
             start = await session.scalar(
                 select(func.coalesce(func.max(EmbeddingChunkRow.seq), -1) + 1).where(
                     EmbeddingChunkRow.document_id == document_id
@@ -683,7 +708,7 @@ class SqlStore(AbstractStore):
                     seq=base + index,
                     content=content,
                     embedding=(
-                        json.dumps(embeddings[index], ensure_ascii=False)
+                        list(embeddings[index])
                         if embeddings is not None
                         and index < len(embeddings)
                         and embeddings[index]
@@ -745,26 +770,37 @@ class SqlStore(AbstractStore):
     ) -> int:
         if not items:
             return 0
-        payload = {
-            chunk_id: json.dumps(vector, ensure_ascii=False)
-            for chunk_id, vector in items
-            if vector
-        }
+        payload = {chunk_id: list(vector) for chunk_id, vector in items if vector}
         if not payload:
             return 0
         async with self._scope() as session:
-            rows = (
+            # 先确认归属（同时得到「实际可更新条数」），再用 executemany 批量回填：
+            # 一次 SELECT + 一次 executemany，避免逐行加载完整片段（含 content）。
+            owned = (
                 await session.scalars(
-                    select(EmbeddingChunkRow).where(
+                    select(EmbeddingChunkRow.id).where(
                         EmbeddingChunkRow.user_id == user_id,
                         EmbeddingChunkRow.id.in_(list(payload)),
                     )
                 )
             ).all()
-            for row in rows:
-                row.embedding = payload[row.id]
-            await session.flush()
-            return len(rows)
+            if not owned:
+                return 0
+            # 走 Core 表而非 ORM 实体：避免 SQLAlchemy 把 executemany 当作
+            # 「按主键批量更新」，要求参数字典里带主键名
+            await session.execute(
+                update(EmbeddingChunkRow.__table__)
+                .where(
+                    EmbeddingChunkRow.__table__.c.user_id == user_id,
+                    EmbeddingChunkRow.__table__.c.id == bindparam("chunk_id"),
+                )
+                .values(embedding=bindparam("embedding")),
+                [
+                    {"chunk_id": chunk_id, "embedding": payload[chunk_id]}
+                    for chunk_id in owned
+                ],
+            )
+            return len(owned)
 
     async def delete_chunks(self, *, user_id: str, document_id: str) -> int:
         stmt = delete(EmbeddingChunkRow).where(
@@ -774,6 +810,165 @@ class SqlStore(AbstractStore):
         async with self._scope() as session:
             result = await session.execute(stmt)
             return int(result.rowcount or 0)
+
+    async def search_chunks(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        source: str = "knowledge",
+        top_k: int = 5,
+        min_score: float = 0.0,
+        candidate_limit: int = 2000,
+    ) -> list[ChunkMatch]:
+        if not vector:
+            return []
+        limit = max(1, top_k)
+        if self._dialect == "postgresql":
+            return await self._search_chunks_pg(
+                user_id,
+                vector,
+                source=source,
+                top_k=limit,
+                min_score=min_score,
+            )
+
+        # MySQL / SQLite：无原生向量类型，取候选后在应用层打分（口径与内存实现一致）
+        candidates = await self.list_chunks(
+            user_id,
+            source=source,
+            only_embedded=True,
+            limit=max(1, candidate_limit),
+        )
+        candidates = [
+            chunk for chunk in candidates if chunk.embedding and len(chunk.embedding) == len(vector)
+        ]
+        if not candidates:
+            return []
+        scores = score_all(vector, [chunk.embedding or [] for chunk in candidates])
+        ranked = sorted(zip(candidates, scores), key=lambda item: item[1], reverse=True)
+        document_ids = {chunk.document_id for chunk, _ in ranked if chunk.document_id}
+        documents = {
+            document.id: document
+            for document in await self.list_documents(user_id)
+            if document.id in document_ids
+        }
+        matches: list[ChunkMatch] = []
+        for chunk, score in ranked:
+            if score < min_score:
+                break
+            document = documents.get(chunk.document_id or "")
+            matches.append(
+                ChunkMatch(
+                    chunk=chunk,
+                    score=score,
+                    filename=document.filename if document is not None else "未知文档",
+                )
+            )
+            if len(matches) >= limit:
+                break
+        return matches
+
+    async def _search_chunks_pg(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        source: str,
+        top_k: int,
+        min_score: float,
+    ) -> list[ChunkMatch]:
+        """PostgreSQL + pgvector：距离在数据库内计算，走 HNSW 索引。"""
+        statement = text(
+            """
+            SELECT e.id AS id,
+                   e.user_id AS user_id,
+                   e.document_id AS document_id,
+                   e.source AS source,
+                   e.seq AS seq,
+                   e.content AS content,
+                   e.meta AS meta,
+                   e.created_at AS created_at,
+                   d.filename AS filename,
+                   1 - (e.embedding <=> CAST(CAST(:embedding AS text) AS vector)) AS score
+              FROM embeddings AS e
+              LEFT JOIN knowledge_documents AS d ON d.id = e.document_id
+             WHERE e.user_id = :user_id
+               AND e.source = :source
+               AND e.embedding IS NOT NULL
+               AND 1 - (e.embedding <=> CAST(CAST(:embedding AS text) AS vector)) >= :min_score
+             ORDER BY e.embedding <=> CAST(CAST(:embedding AS text) AS vector)
+             LIMIT :top_k
+            """
+        )
+        async with self._scope() as session:
+            try:
+                rows = (
+                    await session.execute(
+                        statement,
+                        {
+                            # 文本字面量 + CAST：原生 SQL 绕过 ORM 的向量绑定处理器
+                            "embedding": vector_literal(vector),
+                            "user_id": user_id,
+                            "source": source,
+                            "min_score": float(min_score),
+                            "top_k": int(top_k),
+                        },
+                    )
+                ).mappings()
+                result = list(rows)
+            except SQLAlchemyError:
+                # 常见原因：向量维度与列定义不一致（切换嵌入后端后未重建列/索引）。
+                # 检索是增强能力，失败时降级为空结果，不阻断对话。
+                logger.warning(
+                    "pgvector 检索失败（请检查 EMBEDDING_DIM 是否与列定义一致，并 force 重建索引）",
+                    exc_info=True,
+                )
+                return []
+        def _meta(value: Any) -> dict[str, Any]:
+            # text() 不经过 ORM 的 JSON 类型处理器：asyncpg 下 JSON 列是字符串
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except ValueError:
+                    return {}
+                return parsed if isinstance(parsed, dict) else {}
+            return value if isinstance(value, dict) else {}
+
+        return [
+            ChunkMatch(
+                chunk=EmbeddingChunk(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    content=row["content"] or "",
+                    source=row["source"],
+                    document_id=row["document_id"],
+                    seq=row["seq"],
+                    embedding=None,
+                    meta=_meta(row["meta"]),
+                    created_at=_from_db(row["created_at"]) or utcnow(),
+                ),
+                score=float(row["score"]),
+                filename=row["filename"] or "未知文档",
+            )
+            for row in result
+        ]
+
+    async def list_embedded_document_ids(
+        self, user_id: str, *, source: str = "knowledge"
+    ) -> set[str]:
+        stmt = (
+            select(EmbeddingChunkRow.document_id)
+            .where(
+                EmbeddingChunkRow.user_id == user_id,
+                EmbeddingChunkRow.source == source,
+                EmbeddingChunkRow.embedding.is_not(None),
+                EmbeddingChunkRow.document_id.is_not(None),
+            )
+            .distinct()
+        )
+        async with self._scope() as session:
+            return {row for row in (await session.scalars(stmt)).all() if row}
 
     # ---------------------------------------------------------------- 审计（M5）
     async def add_audit_log(self, entry: AuditLog) -> AuditLog:

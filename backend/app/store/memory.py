@@ -11,10 +11,12 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from app.core.vector_math import score_all
 from app.store.base import AbstractStore
 from app.store.entities import (
     Attachment,
     AuditLog,
+    ChunkMatch,
     ConfigItem,
     EmbeddingChunk,
     KnowledgeDocument,
@@ -396,7 +398,18 @@ class MemoryStore(AbstractStore):
         embeddings: Optional[list[list[float]]] = None,
     ) -> int:
         async with self._lock:
-            seq = sum(1 for chunk in self.chunks.values() if chunk.document_id == document_id)
+            # max(seq)+1 而非 count：删除部分片段后 count 会与已有 seq 撞号
+            seq = (
+                max(
+                    (
+                        chunk.seq
+                        for chunk in self.chunks.values()
+                        if chunk.document_id == document_id
+                    ),
+                    default=-1,
+                )
+                + 1
+            )
             created = 0
             for index, content in enumerate(contents):
                 vector = (
@@ -477,6 +490,58 @@ class MemoryStore(AbstractStore):
             for cid in targets:
                 self.chunks.pop(cid, None)
             return len(targets)
+
+    async def search_chunks(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        source: str = "knowledge",
+        top_k: int = 5,
+        min_score: float = 0.0,
+        candidate_limit: int = 2000,
+    ) -> list[ChunkMatch]:
+        if not vector:
+            return []
+        candidates = [
+            chunk
+            for chunk in self.chunks.values()
+            if chunk.user_id == user_id
+            and chunk.source == source
+            and chunk.embedding
+            and len(chunk.embedding) == len(vector)
+        ][: max(1, candidate_limit)]
+        if not candidates:
+            return []
+        scores = score_all(vector, [chunk.embedding or [] for chunk in candidates])
+        matches: list[ChunkMatch] = []
+        for chunk, score in sorted(
+            zip(candidates, scores), key=lambda item: item[1], reverse=True
+        ):
+            if score < min_score:
+                break
+            document = self.documents.get(chunk.document_id or "")
+            filename = (
+                document.filename
+                if document is not None and document.deleted_at is None
+                else "未知文档"
+            )
+            matches.append(ChunkMatch(chunk=chunk, score=score, filename=filename))
+            if len(matches) >= max(1, top_k):
+                break
+        return matches
+
+    async def list_embedded_document_ids(
+        self, user_id: str, *, source: str = "knowledge"
+    ) -> set[str]:
+        return {
+            chunk.document_id
+            for chunk in self.chunks.values()
+            if chunk.user_id == user_id
+            and chunk.source == source
+            and chunk.embedding
+            and chunk.document_id
+        }
 
     # ---------------------------------------------------------------- 审计（M5）
     async def add_audit_log(self, entry: AuditLog) -> AuditLog:

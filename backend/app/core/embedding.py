@@ -60,6 +60,30 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (math.sqrt(left_norm) * math.sqrt(right_norm))
 
 
+#: 哈希向量是纯 CPU 计算：批量足够大时丢到线程池，避免阻塞事件循环
+_HASH_THREAD_THRESHOLD = 64
+
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_loop: asyncio.AbstractEventLoop | None = None
+_semaphore_limit = 0
+
+
+def _embedding_semaphore() -> asyncio.Semaphore:
+    """进程内向量化并发闸门（按事件循环缓存）。
+
+    本地模型推理会吃满 CPU，上传/重建索引/检索同时触发时若不限流，
+    `to_thread` 的线程会互相抢占，延迟反而更高。上限由 `EMBEDDING_MAX_CONCURRENCY` 控制。
+    """
+    global _semaphore, _semaphore_loop, _semaphore_limit
+    loop = asyncio.get_running_loop()
+    limit = max(1, int(get_settings().embedding_max_concurrency))
+    if _semaphore is None or _semaphore_loop is not loop or _semaphore_limit != limit:
+        _semaphore = asyncio.Semaphore(limit)
+        _semaphore_loop = loop
+        _semaphore_limit = limit
+    return _semaphore
+
+
 def _grams(text: str) -> list[str]:
     """字符 2-gram 与 3-gram（中文无需分词，字符 n-gram 已能覆盖字面匹配）。"""
     compact = " ".join(text.split()).lower()
@@ -96,8 +120,16 @@ class HashEmbedder:
             vector[value % self.dim] += 1.0 if (value >> 63) & 1 else -1.0
         return _l2_normalize(vector)
 
-    async def encode(self, texts: Sequence[str]) -> list[list[float]]:
+    def _encode_batch(self, texts: Sequence[str]) -> list[list[float]]:
         return [self._vector(text) for text in texts]
+
+    async def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        async with _embedding_semaphore():
+            if len(texts) >= _HASH_THREAD_THRESHOLD:
+                return await asyncio.to_thread(self._encode_batch, list(texts))
+            return self._encode_batch(texts)
 
 
 class LocalEmbedder:
@@ -132,18 +164,19 @@ class LocalEmbedder:
     async def encode(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        model = await self._ensure_model()
-        vectors = await asyncio.to_thread(
-            model.encode,
-            list(texts),
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        result = [[float(value) for value in vector] for vector in vectors]
-        # 以模型实际输出维度为准（配置项可能与模型不一致）
-        if result and len(result[0]) != self.dim:
-            self.dim = len(result[0])
-        return result
+        async with _embedding_semaphore():
+            model = await self._ensure_model()
+            vectors = await asyncio.to_thread(
+                model.encode,
+                list(texts),
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            result = [[float(value) for value in vector] for vector in vectors]
+            # 以模型实际输出维度为准（配置项可能与模型不一致）
+            if result and len(result[0]) != self.dim:
+                self.dim = len(result[0])
+            return result
 
 
 _embedder: Embedder | None = None

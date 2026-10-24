@@ -182,6 +182,19 @@ class EmbeddingChunk:
 
 
 @dataclass
+class ChunkMatch:
+    """一次向量检索的命中：片段 + 相似度 + 文档名。
+
+    `filename` 由存储层一并取出（SQL 下是 join，内存下是查字典），
+    避免检索后再按 `document_id` 逐条回查文档表。
+    """
+
+    chunk: EmbeddingChunk
+    score: float
+    filename: str
+
+
+@dataclass
 class AuditLog:
     """工具调用审计记录（M5，《技术设计文档》5.2 `tool_audit_logs`）。
 
@@ -206,6 +219,7 @@ class AuditLog:
 __all__ = [
     "Attachment",
     "AuditLog",
+    "ChunkMatch",
     "ConfigItem",
     "EmbeddingChunk",
     "KnowledgeDocument",

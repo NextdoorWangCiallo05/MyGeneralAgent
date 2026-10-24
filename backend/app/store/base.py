@@ -1,7 +1,8 @@
 """仓储抽象接口：定义上层可见的全部数据访问契约。
 
-`MemoryStore`（进程内）与 `SqlStore`（MySQL/SQLite）必须实现同一组方法，
-调用方只依赖本接口，切换后端无需改动业务代码。
+`MemoryStore`（进程内）与 `SqlStore`（MySQL / PostgreSQL / SQLite）必须实现同一组方法，
+调用方只依赖本接口，切换后端无需改动业务代码。向量检索统一走 `search_chunks`：
+PostgreSQL 下推给 pgvector，其余方言在存储层内部退化为应用层打分。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any, Optional
 from app.store.entities import (
     Attachment,
     AuditLog,
+    ChunkMatch,
     ConfigItem,
     EmbeddingChunk,
     KnowledgeDocument,
@@ -260,6 +262,30 @@ class AbstractStore(ABC):
 
     @abstractmethod
     async def delete_chunks(self, *, user_id: str, document_id: str) -> int: ...
+
+    @abstractmethod
+    async def search_chunks(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        source: str = "knowledge",
+        top_k: int = 5,
+        min_score: float = 0.0,
+        candidate_limit: int = 2000,
+    ) -> list[ChunkMatch]:
+        """按向量检索该用户的片段，返回按相似度降序的前 `top_k` 条。
+
+        这是检索的**唯一下推点**：PostgreSQL + pgvector 走 `ORDER BY embedding <=> :q`
+        （数据库内 top-k）；MySQL / SQLite 退化为取 `candidate_limit` 条后在应用层打分。
+        低于 `min_score` 的命中由实现层过滤。
+        """
+
+    @abstractmethod
+    async def list_embedded_document_ids(
+        self, user_id: str, *, source: str = "knowledge"
+    ) -> set[str]:
+        """已向量化的文档 id 集合（用于文档列表的「已索引」标记，避免拉取全部片段）。"""
 
     # ---------------------------------------------------------------- 审计（M5）
     @abstractmethod

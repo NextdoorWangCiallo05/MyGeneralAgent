@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_pool_recycle: int = 3600
+    # 从池中取连接的最长等待（秒）；高并发下宁可快速失败也不要无限排队
+    db_pool_timeout: float = 30.0
+    # LIFO：优先复用最近归还的连接，空闲时更容易把多余连接回收掉
+    db_pool_use_lifo: bool = True
     # 启动时自动建表（开发便利）；生产请用 `alembic upgrade head`
     auto_create_tables: bool = False
 
@@ -138,12 +142,17 @@ class Settings(BaseSettings):
     embedding_backend: str = "hash"
     # local 模式使用的模型（首次运行会从 HuggingFace 下载）
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    # 向量维度：hash 模式的哈希空间大小；local 模式为期望维度（以模型实际输出为准）
+    # 向量维度：hash 模式的哈希空间大小；local 模式为期望维度（以模型实际输出为准）。
+    # pgvector 列按此定长，切换维度需迁移列并重建索引（见 README「pgvector」）。
     embedding_dim: int = 512
+    # 单进程内同时进行的向量化任务上限：本地模型推理是 CPU 密集操作，
+    # 并发过高只会互相抢占 GIL/线程；超出的请求在此排队。
+    embedding_max_concurrency: int = 4
     # 检索：默认 / 最大返回片段数
     knowledge_search_top_k: int = 5
     knowledge_search_top_k_max: int = 20
-    # 单次检索最多参与打分的文本块数（控制延迟，按文档内顺序取前 N 条）
+    # 单次检索最多参与打分的文本块数：**仅 MySQL / SQLite 生效**（应用层暴力打分）；
+    # PostgreSQL + pgvector 由数据库 top-k + HNSW 索引完成，不再受此上限约束。
     knowledge_search_max_chunks: int = 2000
     # 低于该相似度的片段直接丢弃
     knowledge_search_min_score: float = 0.05

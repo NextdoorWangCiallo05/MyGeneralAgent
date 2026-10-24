@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -28,6 +31,11 @@ __all__ = ["Base", "dispose_engine", "get_engine", "get_sessionmaker", "init_mod
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+logger = logging.getLogger("app.db")
+
+#: 与 Alembic `0008_pgvector_embeddings` 保持一致
+VECTOR_INDEX = "ix_embeddings_embedding_hnsw"
 
 
 class Base(DeclarativeBase):
@@ -51,6 +59,8 @@ def get_engine() -> AsyncEngine:
                 pool_size=settings.db_pool_size,
                 max_overflow=settings.db_max_overflow,
                 pool_recycle=settings.db_pool_recycle,
+                pool_timeout=settings.db_pool_timeout,
+                pool_use_lifo=settings.db_pool_use_lifo,
                 pool_pre_ping=True,
             )
         _engine = create_async_engine(settings.database_url, **options)
@@ -88,6 +98,25 @@ async def init_models() -> None:
     from app import models  # noqa: F401 - 触发模型注册
 
     engine = get_engine()
+    if engine.dialect.name == "postgresql":
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            except SQLAlchemyError:
+                logger.warning("无法自动创建 vector 扩展，请联系 DBA 执行 CREATE EXTENSION vector")
+            await conn.run_sync(Base.metadata.create_all)
+            try:
+                # AUTO_CREATE_TABLES 是开发便捷入口，这里顺带补索引；
+                # 生产走 Alembic（0008），pgvector < 0.5 时索引创建失败仅告警
+                await conn.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS {VECTOR_INDEX} "
+                        "ON embeddings USING hnsw (embedding vector_cosine_ops)"
+                    )
+                )
+            except SQLAlchemyError:
+                logger.warning("HNSW 索引创建失败（pgvector 版本过旧？），检索将退化为精确扫描")
+        return
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

@@ -14,6 +14,8 @@ sqlalchemy[asyncio]>=2.0
 aiomysql>=0.2          # MySQL 异步驱动（纯 Python，依赖 PyMySQL）
 cryptography>=42       # MySQL 8 默认 caching_sha2_password 认证所需（否则连接报 auth 错误）
 alembic>=1.13          # 数据库迁移
+asyncpg>=0.29          # PostgreSQL 异步驱动（pgvector 检索必需）
+pgvector>=0.3          # 原生 vector 列 + asyncpg codec（MySQL/SQLite 部署不使用）
 
 # --- 以下为 M3+ 引入 ---
 # redis>=5.0

@@ -41,6 +41,9 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 #: 重建索引时每批处理的文本块数量
 _REINDEX_BATCH = 64
+#: 单次调用的向量化批量上限：一篇 5 MB 文档可切出数千块，
+#: 一次性送进本地模型会吃满内存，分批后也能在批间让出事件循环
+_EMBED_BATCH = 32
 
 
 def _allowed_types() -> set[str]:
@@ -70,11 +73,14 @@ async def _embed_texts(texts: list[str]) -> list[list[float]] | None:
     embedder = get_embedder()
     if embedder is None or not texts:
         return None
+    vectors: list[list[float]] = []
     try:
-        return await embedder.encode(texts)
+        for start in range(0, len(texts), _EMBED_BATCH):
+            vectors.extend(await embedder.encode(texts[start : start + _EMBED_BATCH]))
     except Exception:  # noqa: BLE001 - 向量化失败不应导致上传失败
         logger.exception("文档向量化失败，可稍后通过「重建索引」补齐")
         return None
+    return vectors
 
 
 @router.post(
@@ -139,16 +145,9 @@ async def upload_document(
 
 @router.get("/documents", response_model=DocumentListResponse)
 async def list_documents(user: CurrentUser, store: Store) -> DocumentListResponse:
-    settings = get_settings()
     documents = await store.list_documents(user.id)
-    # 一次取出已向量化的片段，用于标记每份文档的索引状态
-    embedded = await store.list_chunks(
-        user.id,
-        source="knowledge",
-        only_embedded=True,
-        limit=settings.knowledge_search_max_chunks,
-    )
-    indexed = {chunk.document_id for chunk in embedded}
+    # 只取「已向量化的文档 id」（DISTINCT），不再拉取全部片段用于标记索引状态
+    indexed = await store.list_embedded_document_ids(user.id)
     items = [
         DocumentPublic.model_validate(document).model_copy(
             update={"embedded": document.id in indexed}
