@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     # 上传后未随消息发出的附件保留时长（秒），超时自动清理
     attachment_ttl_seconds: int = 24 * 60 * 60
 
+    # ---- 技能（Skill，见 app/skills/）----
+    # 自定义技能目录：每个 *.md 一个技能，文件名即技能 id；留空只用内置技能。
+    # 修改文件后需重启服务生效（进程内注册表只装配一次）。
+    skills_dir: str = ""
+
     # ---- M4：知识库（RAG，见 app/api/knowledge.py）----
     # 单个文档的大小上限（字节）
     knowledge_max_file_bytes: int = 5 * 1024 * 1024

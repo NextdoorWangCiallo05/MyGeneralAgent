@@ -14,7 +14,16 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
-from app.api import admin, attachments, auth, chat, knowledge, runtime, sessions
+from app.api import (
+    admin,
+    attachments,
+    auth,
+    chat,
+    knowledge,
+    runtime,
+    sessions,
+    skills,
+)
 from app.config import get_settings
 from app.core.errors import AppError
 from app.core.logging import new_request_id, set_request_id, setup_logging
@@ -208,6 +217,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router, prefix=prefix)
     app.include_router(chat.router, prefix=prefix)
     app.include_router(runtime.router, prefix=prefix)
+    app.include_router(skills.router, prefix=prefix)
     app.include_router(knowledge.router, prefix=prefix)
     app.include_router(attachments.router, prefix=prefix)
     app.include_router(admin.router, prefix=prefix)

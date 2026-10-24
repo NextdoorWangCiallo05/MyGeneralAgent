@@ -2,7 +2,7 @@
  * 后端 API 客户端：统一处理鉴权头、错误码与令牌存储。
  */
 
-import type { AttachmentDetail, AttachmentMeta } from "./types";
+import type { AttachmentDetail, AttachmentMeta, Skill } from "./types";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
@@ -129,4 +129,10 @@ export function deleteAttachment(id: string): Promise<{ message: string }> {
  */
 export function listSessionAttachments(sessionId: string): Promise<AttachmentMeta[]> {
   return request<AttachmentMeta[]>(`/api/v1/sessions/${sessionId}/attachments`);
+}
+
+/** 当前可用的技能（内置 + 服务端 `SKILLS_DIR` 里的自定义技能）。 */
+export async function listSkills(): Promise<Skill[]> {
+  const data = await request<{ items: Skill[]; total: number }>("/api/v1/skills");
+  return data.items;
 }

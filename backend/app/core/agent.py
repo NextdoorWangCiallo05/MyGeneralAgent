@@ -18,6 +18,7 @@ from app.core.events import Event
 from app.core.summary import plan_context
 from app.core.tracing import get_tracer
 from app.llm.client import ChatChunk, ChunkKind, LLMClient, LLMRequestError
+from app.skills.base import Skill
 from app.store.base import AbstractStore
 from app.store.entities import Attachment, Message, Session, User
 from app.tools.context import ToolContext, reset_tool_context, set_tool_context
@@ -102,6 +103,7 @@ class Agent:
         keep_from: int = 0,
         session_files: list[Attachment] | None = None,
         turn_attachments: list[Attachment] | None = None,
+        skill: Skill | None = None,
     ) -> list[dict[str, Any]]:
         """组装本轮送入模型的消息。
 
@@ -118,6 +120,10 @@ class Agent:
         files_block = self._render_session_files(session_files or [])
         if files_block:
             system = f"{system}\n{files_block}\n"
+        if skill is not None:
+            # 技能只改角色与工具范围，不动会话模型；放在文件区之后，
+            # 让「当前任务是谁」成为 system 里最后一条强约束
+            system = f"{system}\n{self._render_skill(skill)}\n"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for item in history[keep_from:]:
             if item.role == "tool":
@@ -178,12 +184,14 @@ class Agent:
         user_input: str,
         regenerate: bool = False,
         attachments: list[Attachment] | None = None,
+        skill: Skill | None = None,
     ) -> AsyncIterator[Event]:
         """执行一轮对话，逐步产出事件。
 
         `attachments` 为本轮随消息上传的附件（先经 `POST /api/v1/attachments` 上传）；
         `regenerate=True` 时先摘掉最后一轮再重跑，使送出模型的上下文与原轮完全一致，
         该轮附件按库中记录恢复，前端无需回传。
+        `skill` 为本轮选用的技能：只在 system 提示与工具范围上生效，不改动模型与会话。
         """
         history = await self._store.list_messages(session.id)
         if regenerate:
@@ -220,6 +228,7 @@ class Agent:
             keep_from=plan.keep_from,
             session_files=session_files,
             turn_attachments=attachments,
+            skill=skill,
         )
 
         user_message = await self._store.add_message(
@@ -245,11 +254,16 @@ class Agent:
         sandbox_on = self._sandbox_enabled(session)
         # 知识库没有任何已索引片段时不暴露 knowledge_search，避免模型反复空转（M4）
         knowledge_on = await self._knowledge_enabled(session)
-        tool_schemas = self._registry.schemas_for(
+        # 技能只收窄工具范围，不会放宽会话本身的限制（沙箱 / 知识库 / 附件）
+        allowed_tools = skill.restricted_tools if skill is not None else None
+        available_tools = self._registry.available_names(
             sandbox_enabled=sandbox_on,
             knowledge_enabled=knowledge_on,
             attachments_enabled=bool(session_files),
         )
+        if allowed_tools is not None:
+            available_tools = [name for name in available_tools if name in allowed_tools]
+        tool_schemas = self._registry.schemas(available_tools)
         prompt_tokens = 0
         completion_tokens = 0
         finish_reason = "stop"
@@ -345,7 +359,18 @@ class Agent:
                     tool = self._registry.get(name)
                     approved = False
 
-                    if tool is not None and tool.sandbox_required and not sandbox_on:
+                    if allowed_tools is not None and name not in allowed_tools:
+                        # schema 已裁剪，正常不会被选中；防止模型凭记忆调用技能外的工具
+                        result = ToolResult(
+                            status="error",
+                            summary=f"{name} 不在当前技能范围内",
+                            content=(
+                                f"错误：当前技能「{skill.name if skill else ''}」只允许使用 "
+                                f"{'、'.join(sorted(allowed_tools)) or '（无）'}，"
+                                "请改用允许的工具，或直接基于已有信息作答。"
+                            ),
+                        )
+                    elif tool is not None and tool.sandbox_required and not sandbox_on:
                         # schema 已裁剪，正常不会被选中；此处仅作防御性兜底
                         result = ToolResult(
                             status="error",
@@ -444,6 +469,20 @@ class Agent:
             yield Event.done("error")
 
     # ---------------------------------------------------------------- 辅助
+    @staticmethod
+    def _render_skill(skill: Skill) -> str:
+        """把技能渲染成 system 里的「当前技能」区。"""
+        lines = [f"【当前技能：{skill.name}】"]
+        if skill.instructions.strip():
+            lines.append(skill.instructions.strip())
+        if skill.tools:
+            names = "、".join(f"`{name}`" for name in skill.tools)
+            lines.append(
+                f"本技能只允许使用这些工具：{names}；"
+                "所需工具不可用时如实说明并给出替代方案，不要假装执行。"
+            )
+        return "\n".join(lines)
+
     def _render_session_files(self, files: list[Attachment]) -> str:
         """把会话内所有附件渲染成放在 system 里的「本会话文件」区。
 

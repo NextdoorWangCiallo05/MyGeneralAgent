@@ -15,6 +15,9 @@ class ChatRequest(BaseModel):
     #: 思考模式：true 用厂商的推理模型（前后端约定的开关，前端不需要知道模型名），
     #: false 回落到默认模型；不传表示保持会话当前设置不变
     thinking: Optional[bool] = None
+    #: 技能 id（见 `GET /api/v1/skills`）：注入该技能的角色指令并收敛工具范围；
+    #: 不传 / 空串表示不使用技能
+    skill_id: Optional[str] = Field(default=None, max_length=64)
     tools: Optional[list[str]] = None
     sandbox_enabled: Optional[bool] = None
     #: 重新生成：摘掉最后一轮后重跑，`message` 需为该轮的原提问文案

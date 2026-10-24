@@ -87,6 +87,17 @@ export type RuntimeConfig = {
   thinking_model: string;
 };
 
+/** 可用技能（`GET /api/v1/skills`）。 */
+export type Skill = {
+  id: string;
+  name: string;
+  description: string;
+  /** 该技能限定的工具名；空数组 = 不限制 */
+  tools: string[];
+  /** 来源：builtin / file / 自定义 Provider */
+  source: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";

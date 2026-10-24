@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import SkillMenu from "@/components/SkillMenu";
 import { deleteAttachment, uploadAttachment } from "@/lib/api";
-import type { AttachmentMeta } from "@/lib/types";
+import type { AttachmentMeta, Skill } from "@/lib/types";
 
 /** 单条消息可携带的附件上限（与后端 `attachment_max_per_message` 默认值一致）。 */
 const MAX_ATTACHMENTS = 5;
@@ -32,6 +33,10 @@ type Props = {
   thinkingAvailable?: boolean;
   thinkingModel?: string;
   onToggleThinking?: () => void;
+  /** 技能：服务端下发的可选技能与当前选择（空串 = 通用助手） */
+  skills?: Skill[];
+  skillId?: string;
+  onSelectSkill?: (skillId: string) => void;
 };
 
 export default function ChatComposer({
@@ -43,6 +48,9 @@ export default function ChatComposer({
   thinkingAvailable = false,
   thinkingModel = "",
   onToggleThinking,
+  skills = [],
+  skillId = "",
+  onSelectSkill,
 }: Props) {
   const [value, setValue] = useState("");
   const [items, setItems] = useState<PendingAttachment[]>([]);
@@ -171,6 +179,9 @@ export default function ChatComposer({
             disabled={disabled}
           />
           <div className="composer-actions">
+            {onSelectSkill ? (
+              <SkillMenu skills={skills} value={skillId} onChange={onSelectSkill} />
+            ) : null}
             <button
               type="button"
               className={`mode-toggle${thinking ? " is-on" : ""}`}

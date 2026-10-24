@@ -13,7 +13,9 @@ Langfuse / LangSmith 可插拔链路追踪、工具调用审计（`tool_audit_lo
 附件绑定会话后整个对话都可调用（正文注入 system 的「本会话文件」区，超预算部分由 `read_attachment` 按需读取），
 气泡内可展开原文预览（详见下文「对话附件」章节）；
 **对话界面支持「思考模式」**（会话级切换推理模型、流式展示并自动收起思考过程）与**多套配色**
-（5 套色板 + 跟随系统，刷新不闪烁）。
+（5 套色板 + 跟随系统，刷新不闪烁）；
+**新增技能（Skill）模块**：为对话指定「角色指令 + 工具范围」（内置调研 / 代码 / 写作，
+也可把自定义 Markdown 技能丢进 `SKILLS_DIR`，或实现 `SkillProvider` 接入数据库等来源）。
 详细设计见 [`docs/技术设计文档.md`](docs/技术设计文档.md)。
 
 ---
@@ -53,6 +55,7 @@ Agent/
 │   │   │                        # 结构化日志（logging）、限流（ratelimit）、链路追踪（tracing）、工具审计（audit）
 │   │   ├── llm/                 # LLM 抽象 + DeepSeek 流式客户端
 │   │   ├── search/              # 联网搜索：后端协议 + 预设表 + Bing / DuckDuckGo / Tavily / Serper / Brave / SearXNG 实现
+│   │   ├── skills/              # 技能：数据模型 + 注册表 + 内置技能 + SkillProvider / 目录加载
 │   │   ├── tools/               # 工具基类、注册表、沙箱隔离层、8 个内置工具
 │   │   ├── db/                  # 异步引擎、会话工厂、声明式基类
 │   │   ├── models/              # ORM 模型（users / sessions / messages / attachments / tokens /
@@ -66,6 +69,7 @@ Agent/
 │   ├── requirements-ml.txt      # 可选：本地语义嵌入（EMBEDDING_BACKEND=local）
 │   └── .env.example
 └── frontend/
+    ├── e2e/                     # Playwright E2E（拦截 /api/v1/**，不依赖真实后端）
     └── src/
         ├── app/                 # login / register / forgot-password / reset-password / admin / (main)（对话与 /knowledge 知识库）
         ├── components/          # ChatWindow / SessionSidebar / MessageBubble / ToolCallCard / ChatComposer
@@ -572,6 +576,62 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 
 ---
 
+## 技能（Skill）
+
+技能 = **一段角色指令 + 一个工具范围**，用来把通用助手临时切成「调研员 / 代码助手 / 文案」。
+它不是工具、不执行代码：只影响本轮 system 提示与下发给模型的工具清单，不改模型、不改会话。
+
+### 内置技能
+
+| id | 名称 | 工具范围 |
+|----|------|----------|
+| `research` | 深度调研 | `web_search` / `fetch_url` / `knowledge_search` / `calculator` |
+| `coding` | 代码助手 | `read_file` / `write_file` / `python_exec` / `calculator` |
+| `writing` | 文案写作 | `web_search` |
+
+前端输入区「技能」按钮选择，选中项随下一次请求以 `skill_id` 下发；不选即通用助手。
+`GET /api/v1/skills` 返回 id / 名称 / 说明 / 工具范围 / 来源（`builtin` 或 `file`），前端据此渲染选择器。
+
+### 自定义：两条路
+
+**1）目录挂载（不改代码）**：`SKILLS_DIR` 指向一个目录，每个 `*.md` 一个技能，文件名即 id：
+
+```markdown
+---
+name: 合同审阅
+description: 逐条核对合同条款风险
+tools: read_file, write_file
+---
+
+你是资深合同律师，审阅时先列风险点，再给修改建议。
+```
+
+`tools` 留空 = 不限制；与内置同 id 时覆盖内置（方便按团队规范改写写作风格）。
+解析失败 / id 非法的文件会跳过并打 warning，不影响其他技能。**改完文件需重启服务**（注册表进程内装配一次）。
+
+**2）实现 Provider（接数据库 / 配置中心）**：满足 `app/skills/providers.py` 的 `SkillProvider` 协议即可：
+
+```python
+class DbSkillProvider:
+    name = "db"
+    def load(self) -> Iterable[Skill]:
+        for row in fetch_rows():
+            yield Skill(id=row.id, name=row.name, instructions=row.prompt,
+                        tools=tuple(row.tools), source=self.name)
+```
+
+挂到 `build_skill_registry()` 后，`GET /api/v1/skills` 与对话链路立即可见。
+
+### 规则与边界
+
+- **只收窄、不放宽**：技能的工具范围与会话限制取交集——沙箱没开时，`coding` 技能也拿不到 `write_file`；
+- **越权拦截**：模型若凭记忆调用技能外的工具，会被拦下并返回错误结果，不会真的执行；
+- **安全**：`SKILLS_DIR` 里的内容等同于管理员配置（会进 system 提示），不要指向用户可上传的目录；
+- **优先级**：`skill_id` 是单轮参数，独立于 `thinking` 与会话模型，可自由组合；
+- **重置**：前端切换技能只影响下一轮，不改历史消息。
+
+---
+
 ## 可观测性与限流（M5）
 
 ### 结构化日志（`app/core/logging.py`）
@@ -643,6 +703,7 @@ app/search/backends/      # bing / duckduckgo / tavily / serper / brave / searxn
 | 方法 | 路径 | 说明 | 权限 |
 |------|------|------|------|
 | GET | `/api/v1/config` | 返回 `sandbox_global_enabled`（含沙箱可用工具名）、知识库检索能力 `knowledge_enabled` / `knowledge_backend`、思考模式能力 `thinking_available` / `thinking_model`（**不含任何敏感项**） | user |
+| GET | `/api/v1/skills` | 可用技能列表（`id` / `name` / `description` / `tools` / `source`），供输入区选择器使用 | user |
 | POST | `/api/v1/chat/confirm` | 回应 `tool_confirm`：`{session_id, tool_call_id, approved}` | user |
 
 ---
@@ -685,7 +746,7 @@ cd backend
 .venv/Scripts/python.exe -m pytest tests -q
 ```
 
-共 206 个用例，覆盖：
+共 216 个用例，覆盖：
 
 - 健康检查、注册 / 登录 / 鉴权失败、参数校验、重复注册
 - 找回密码全流程（含**令牌一次性**、**令牌过期/无效**、**防用户枚举**）
@@ -751,6 +812,11 @@ cd backend
   模型把参数传成字符串时的兜底、`keyword` 命中（返回上下文窗口）与未命中、空 id / 不存在的 id 给出可纠正的错误、
   **他人附件读不到**、**已绑定到其他会话的附件拒绝读取**、
   注册表按 `attachments_enabled` 门控该工具、工具只读且不需确认 / 沙箱
+- **技能（10 个用例，`tests/test_skills.py`）**：接口下发内置技能且不泄漏完整指令、未登录 401、
+  选中技能后 system 注入角色指令且工具收敛到技能范围、不选技能保持默认工具集、
+  未知 `skill_id` 报 `400 SKILL_NOT_FOUND` 且不留下空会话、
+  **模型调用技能外工具被拦下**（`tool_result.status=error`，不下发该 schema）、
+  目录技能的 frontmatter 解析 / 非法文件跳过 / 同名覆盖内置 / `/skills` 反映 `SKILLS_DIR`
 - **SQL 仓储（追加）**：附件写入 / 批量取回保序 / 消息 `attachments` JSON 往返 / 绑定 / 过期清理 / 删除、
   **大文本列在 MySQL 方言下编译为 `LONGTEXT`**（模型层的字节上限守门）
 - **限流 / 可观测性 / 审计（M5，16 个用例）**：滑动窗口计数与前 N 次放行、
@@ -763,6 +829,22 @@ cd backend
 
 > 测试默认跑在内存后端（零依赖）；SQL 仓储与持久化用例使用临时 SQLite 异步库，
 > 与 MySQL 共享同一套 SQLAlchemy 模型与迁移，因此无需本地 MySQL 即可回归。
+
+### 前端 E2E（Playwright）
+
+```bash
+cd frontend
+npm run test:e2e        # 串行跑 7 条关键路径
+npm run test:e2e:ui     # 调试用
+```
+
+- **不依赖真实后端**：`e2e/support/mock.ts` 拦截 `/api/v1/**`（含 SSE），固定数据、可断言请求体，
+  因此数据库 / LLM / 网络都不会让测试变脆；后端契约仍由 pytest 覆盖；
+- **覆盖路径**：未登录跳转、登录进入对话、流式渲染与思考过程自动收起、思考模式开关与请求体、
+  厂商不支持推理模型时置灰、技能选择与 `skill_id`、配色切换与刷新保持；
+- **浏览器**：默认复用本机 Chrome（`channel: "chrome"`，不下载）；无 Chrome 的环境执行
+  `npx playwright install chromium` 并设 `PW_CHANNEL=chromium`；
+- **独立产物目录**：测试服务器用 `NEXT_DIST_DIR=.next-e2e`，不碰开发/生产的 `.next`。
 
 ---
 
@@ -858,7 +940,7 @@ cd backend
 `UNAUTHORIZED` / `FORBIDDEN` / `INVALID_CREDENTIALS` / `USER_EXISTS` / `VALIDATION_ERROR` /
 `INVALID_RESET_TOKEN` / `SESSION_NOT_FOUND` / `API_KEY_NOT_CONFIGURED` / `LLM_ERROR` /
 `MAX_STEPS_EXCEEDED` / `CONFIRMATION_NOT_FOUND` / `EMBEDDING_UNAVAILABLE` / `RATE_LIMITED` /
-`ATTACHMENT_NOT_FOUND` / `TOO_MANY_ATTACHMENTS` / `THINKING_MODE_UNAVAILABLE`
+`ATTACHMENT_NOT_FOUND` / `TOO_MANY_ATTACHMENTS` / `THINKING_MODE_UNAVAILABLE` / `SKILL_NOT_FOUND`
 
 统一响应体：`{ "code": "...", "message": "..." }`
 
@@ -930,6 +1012,7 @@ app/store/__init__.py # get_store()：按 STORE_BACKEND 选择实现
 | 向量化与检索 | 可插拔嵌入后端（默认零依赖 `hash`，可选本地 BGE）+ `knowledge_search` 工具 + 重建索引 / 检索调试接口 | ~~M4~~ **已完成**；语义质量取决于所选嵌入后端 |
 | 向量存储 | JSON 文本 + 应用层余弦暴力检索（数万 chunk 量级） | 数据量上来后换 pgvector / 独立向量库 |
 | 对话附件 | 输入框上传 / 拖拽（txt / md / csv / json / pdf 等），绑定后**整个会话可用**（system 注入 + `read_attachment` 按需读取）、气泡内可预览原文、可在「本会话文件」栏自行删除；未发送附件按 TTL 清理 | **已完成**（正文与消息分表存储） |
+| 技能（Skill） | 内置 3 个 + `SKILLS_DIR` 自定义 Markdown + 可插拔 `SkillProvider`；`skill_id` 为单轮参数，注入 system 并收敛工具范围 | **已完成**；改技能文件需重启（后续可加热加载 / 后台管理） |
 | 停止生成 | 单实例内存任务表 | 多实例部署改 Redis |
 
 > 关于「思考过程」：`deepseek-flash` 不返回 `reasoning_content`，此时中间推理文本会作为 `text` 事件直接流式展示；

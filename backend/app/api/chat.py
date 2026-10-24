@@ -32,6 +32,7 @@ from app.llm import (
 )
 from app.schemas.auth import MessageResponse
 from app.schemas.chat import ChatRequest, ConfirmRequest, StopRequest
+from app.skills import resolve_skill
 from app.store.entities import Attachment, Session, User
 from app.tools.registry import ToolRegistry, build_default_registry
 
@@ -129,6 +130,8 @@ async def chat(payload: ChatRequest, user: CurrentUser, store: Store) -> Streami
         raise ApiKeyNotConfiguredError(f"管理员尚未配置 {llm.label} 的 API-Key")
 
     attachments = await _resolve_attachments(payload, user, store, settings)
+    # 技能先于会话创建校验：技能 id 无效时不该留下一个空会话
+    skill = resolve_skill(payload.skill_id)
     session = await _resolve_session(
         payload, user, store, llm.model, resolve_thinking_model(settings)
     )
@@ -140,6 +143,7 @@ async def chat(payload: ChatRequest, user: CurrentUser, store: Store) -> Streami
             "model": session.model,
             "provider": llm.provider,
             "attachments": len(attachments),
+            "skill": skill.id if skill else "",
         },
     )
     client = build_llm_client(llm)
@@ -156,6 +160,7 @@ async def chat(payload: ChatRequest, user: CurrentUser, store: Store) -> Streami
                 user_input=payload.message,
                 regenerate=payload.regenerate,
                 attachments=attachments,
+                skill=skill,
             ):
                 yield event.to_sse()
         except asyncio.CancelledError:

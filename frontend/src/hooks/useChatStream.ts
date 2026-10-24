@@ -36,6 +36,8 @@ export type ChatPayload = {
   /** 思考模式：true 用厂商的推理模型、false 回落默认模型；不传则保持会话设置 */
   thinking?: boolean;
   sandbox_enabled?: boolean;
+  /** 技能 id（`GET /api/v1/skills`）：本轮注入角色指令并收敛工具范围 */
+  skill_id?: string;
   /** 重新生成：`message` 传该轮原提问，后端会摘掉最后一轮再重跑 */
   regenerate?: boolean;
   /** 随本条消息发送的附件 id（由 `POST /api/v1/attachments` 上传后拿到） */

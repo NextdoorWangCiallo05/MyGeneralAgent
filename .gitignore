@@ -11,6 +11,12 @@ venv/
 # Node / Next.js
 node_modules/
 .next/
+.next-e2e/
+
+# 前端 E2E（Playwright）产物
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
 out/
 next-env.d.ts
 *.tsbuildinfo

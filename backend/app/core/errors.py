@@ -150,3 +150,11 @@ class ThinkingModeUnavailableError(AppError):
     code = "THINKING_MODE_UNAVAILABLE"
     http_status = 400
     default_message = "当前模型厂商未配置推理模型，思考模式不可用（可用 THINKING_MODEL 指定）"
+
+
+class SkillNotFoundError(AppError):
+    """请求里指定的技能不存在（可能已下线，或拼错了 id）。"""
+
+    code = "SKILL_NOT_FOUND"
+    http_status = 400
+    default_message = "指定的技能不存在"

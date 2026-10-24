@@ -7,7 +7,13 @@ import MessageBubble from "@/components/MessageBubble";
 import SessionSidebar from "@/components/SessionSidebar";
 import { useAuth } from "@/hooks/useAuth";
 import { useChatStream } from "@/hooks/useChatStream";
-import { ApiError, deleteAttachment, listSessionAttachments, request } from "@/lib/api";
+import {
+  ApiError,
+  deleteAttachment,
+  listSessionAttachments,
+  listSkills,
+  request,
+} from "@/lib/api";
 import {
   toChatMessages,
   type AttachmentMeta,
@@ -15,6 +21,7 @@ import {
   type RuntimeConfig,
   type ServerMessage,
   type Session,
+  type Skill,
   type ToolCallView,
 } from "@/lib/types";
 
@@ -38,6 +45,9 @@ export default function ChatWindow() {
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   // 思考模式：按会话记忆（后端把推理模型写进 session.model），新会话沿用当前选择
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  // 技能是「本轮参数」：切换会话不重置，用户选过的角色继续用在下一轮
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillId, setSkillId] = useState("");
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [usage, setUsage] = useState<{ prompt: number; completion: number } | null>(null);
@@ -73,6 +83,22 @@ export default function ChatWindow() {
       }
     })();
   }, []);
+
+  // 技能列表读不到时不显示入口，对话本身不受影响
+  useEffect(() => {
+    void (async () => {
+      try {
+        setSkills(await listSkills());
+      } catch {
+        setSkills([]);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    // 技能被下线 / 改名后，前端不应继续抱着一个无效 id 发请求
+    if (skillId && !skills.some((item) => item.id === skillId)) setSkillId("");
+  }, [skills, skillId]);
 
   const sandboxAvailable = runtime?.sandbox_global_enabled ?? false;
   const thinkingAvailable = runtime?.thinking_available ?? false;
@@ -212,6 +238,8 @@ export default function ChatWindow() {
           sandbox_enabled: sandboxAvailable && sandboxEnabled,
           // 不可用时不下发，避免服务端 400（开关本来也点不动）
           thinking: thinkingAvailable ? thinkingEnabled : undefined,
+          // 空串 = 通用助手；技能是单轮参数，不需要写回会话
+          skill_id: skillId || undefined,
           regenerate,
           attachment_ids: attachmentIds,
         },
@@ -317,6 +345,7 @@ export default function ChatWindow() {
       sandboxAvailable,
       sandboxEnabled,
       send,
+      skillId,
       thinkingAvailable,
       thinkingEnabled,
       thinkingModel,
@@ -525,6 +554,9 @@ export default function ChatWindow() {
           thinkingAvailable={thinkingAvailable}
           thinkingModel={thinkingModel}
           onToggleThinking={() => setThinkingEnabled((prev) => !prev)}
+          skills={skills}
+          skillId={skillId}
+          onSelectSkill={setSkillId}
         />
       </main>
     </div>
